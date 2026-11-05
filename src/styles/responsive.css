@@ -1,0 +1,318 @@
+@media (max-width: 1180px) {
+  :root {
+    --sidebar-width: 312px;
+  }
+
+  .app {
+    padding: 12px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Mobile / tablet: separate screens
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  :root {
+    --sidebar-width: 100%;
+  }
+
+  body {
+    background-attachment: scroll;
+  }
+
+  .app {
+    grid-template-columns: 1fr;
+    gap: 0;
+    max-width: none;
+    padding: 0;
+  }
+
+  .sidebar {
+    height: var(--app-height);
+    padding:
+      calc(16px + var(--safe-top)) calc(16px + var(--safe-right))
+      calc(12px + var(--safe-bottom)) calc(16px + var(--safe-left));
+    border: 0;
+    border-radius: 0;
+  }
+
+  .chat {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    height: var(--app-height);
+    border: 0;
+    border-radius: 0;
+    visibility: hidden;
+    transform: translateX(102%);
+    transition:
+      transform 0.3s var(--ease),
+      visibility 0.3s var(--ease);
+  }
+
+  .app.is-chat-open .chat {
+    visibility: visible;
+    transform: translateX(0);
+  }
+
+  .chat-header {
+    min-height: 66px;
+    padding:
+      calc(12px + var(--safe-top)) calc(14px + var(--safe-right)) 12px
+      calc(8px + var(--safe-left));
+  }
+
+  .chat-back {
+    display: grid;
+  }
+
+  .messages {
+    padding: 16px 14px 8px;
+  }
+
+  .message {
+    max-width: 86%;
+  }
+
+  .composer {
+    gap: 8px;
+    padding:
+      10px calc(10px + var(--safe-right)) calc(10px + var(--safe-bottom))
+      calc(10px + var(--safe-left));
+  }
+
+  .composer-field {
+    padding: 5px 14px;
+  }
+
+  .composer textarea {
+    font-size: 16px;
+  }
+
+  .send-btn {
+    width: 46px;
+    height: 46px;
+  }
+
+  .connection-label {
+    display: none;
+  }
+
+  .security-pill {
+    padding: 6px 7px;
+  }
+
+  .security-pill span {
+    display: none;
+  }
+
+  .modal-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: 92dvh;
+    padding-bottom: var(--safe-bottom);
+    border-radius: 24px 24px 0 0;
+  }
+
+  .modal-header {
+    padding: 20px 20px 14px;
+  }
+
+  .modal-body {
+    padding: 6px 20px 20px;
+  }
+
+  .toast-stack {
+    bottom: calc(14px + var(--safe-bottom));
+  }
+
+  .auth {
+    padding-right: calc(16px + var(--safe-right));
+    padding-left: calc(16px + var(--safe-left));
+  }
+
+  .auth-card {
+    padding: 28px 24px;
+    border-radius: 26px;
+  }
+
+  .auth-intro h1 {
+    font-size: 27px;
+  }
+
+  .input {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 560px) {
+  .auth {
+    padding-top: calc(18px + var(--safe-top));
+  }
+
+  .auth-card {
+    padding: 24px 20px;
+    border-radius: 24px;
+  }
+
+  .brand--auth {
+    margin-bottom: 22px;
+  }
+
+  .brand--auth .brand-mark {
+    width: 40px;
+    height: 40px;
+  }
+
+  .auth-intro h1 {
+    font-size: 25px;
+  }
+
+  .auth-intro p {
+    font-size: 13px;
+  }
+
+  .auth-form {
+    margin-top: 22px;
+    gap: 14px;
+  }
+
+  .auth-footer {
+    margin-top: 20px;
+    font-size: 10px;
+  }
+
+  .auth-legal {
+    display: none;
+  }
+
+  .access-title {
+    font-size: 22px;
+  }
+
+  .chat-title {
+    font-size: 16px;
+  }
+
+  .chat-subtitle {
+    font-size: 10.5px;
+  }
+
+  .message {
+    max-width: 90%;
+  }
+
+  .message-bubble {
+    padding: 9px 12px;
+  }
+
+  .message-author {
+    font-size: 10.5px;
+  }
+
+  .messages-state {
+    padding: 18px;
+  }
+
+  .modal-header h2 {
+    font-size: 18px;
+  }
+}
+
+@media (max-width: 380px) {
+  .sidebar {
+    padding-right: calc(12px + var(--safe-right));
+    padding-left: calc(12px + var(--safe-left));
+  }
+
+  .chat-status {
+    gap: 4px;
+  }
+
+  .security-pill {
+    display: none;
+  }
+
+  .message {
+    max-width: 94%;
+  }
+}
+
+/* Phone in landscape: keep the login form reachable without a long scroll. */
+@media (max-height: 560px) {
+  .auth {
+    padding-top: calc(12px + var(--safe-top));
+    padding-bottom: 12px;
+  }
+
+  .auth-card {
+    margin: 0 auto;
+    padding: 20px 24px;
+  }
+
+  .brand--auth {
+    margin-bottom: 14px;
+  }
+
+  .auth-intro p,
+  .auth-footer {
+    display: none;
+  }
+
+  .auth-form {
+    margin-top: 16px;
+    gap: 12px;
+  }
+
+  .auth-form .btn {
+    padding-block: 12px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Performance and accessibility
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 480px) {
+  .glass,
+  .modal,
+  .toast {
+    backdrop-filter: blur(14px) saturate(125%);
+    -webkit-backdrop-filter: blur(14px) saturate(125%);
+  }
+
+  .auth-card {
+    backdrop-filter: blur(18px) saturate(125%);
+    -webkit-backdrop-filter: blur(18px) saturate(125%);
+  }
+}
+
+@supports not (
+  (backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))
+) {
+  .glass,
+  .modal,
+  .toast {
+    background-color: rgba(14, 8, 24, 0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .auth-glow {
+    animation: none;
+  }
+}

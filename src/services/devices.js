@@ -1,0 +1,57 @@
+import { supabase } from './supabase.js';
+
+export async function getDevice(deviceId) {
+  const { data, error } = await supabase
+    .from('devices')
+    .select('id, user_id, name, public_key_jwk, status, created_at, last_seen_at')
+    .eq('id', deviceId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function listMyDevices(userId) {
+  const { data, error } = await supabase
+    .from('devices')
+    .select('id, user_id, name, status, created_at, last_seen_at, revoked_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: true });
+
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function registerDevice({ deviceId, name, publicJwk }) {
+  const { data, error } = await supabase.rpc('register_device', {
+    p_device_id: deviceId,
+    p_name: name,
+    p_public_key_jwk: {
+      kty: 'EC',
+      crv: 'P-256',
+      x: publicJwk.x,
+      y: publicJwk.y,
+    },
+  });
+
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
+export async function revokeDevice(deviceId) {
+  const { data, error } = await supabase.rpc('revoke_device', {
+    p_device_id: deviceId,
+  });
+
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
+export async function getConversationDevices(conversationId) {
+  const { data, error } = await supabase.rpc('get_conversation_devices', {
+    p_conversation_id: conversationId,
+  });
+
+  if (error) throw error;
+  return data ?? [];
+}
