@@ -167,7 +167,7 @@ Vite использует `base: '/bars/'` для production. CSP встраив
 | `npm run dev` | dev-сервер Vite |
 | `npm run build` | production-сборка в `dist` |
 | `npm run preview` | локальный просмотр `dist` |
-| `npm test` | 23 теста: 12 криптографических и 11 backend-тестов на PostgreSQL |
+| `npm test` | 24 теста: 12 криптографических и 12 backend-тестов на PostgreSQL |
 | `npm run lint` | ESLint |
 
 ## Структура

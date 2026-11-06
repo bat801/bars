@@ -584,6 +584,41 @@ describe('BARS backend migrations', () => {
     ]);
   });
 
+  it('upgrades an M1 database and binds on the next registration', async () => {
+    db = await createDatabase({ migrations: MIGRATIONS.slice(0, 5) });
+    await seedUsers();
+
+    // M1 client: the device exists, but no session binding does.
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    await asAdmin(db);
+    const migration = await readFile(
+      join(MIGRATIONS_DIR, '20261106090000_device_sessions.sql'),
+      'utf8',
+    );
+    await db.exec(migration);
+
+    // The old session is intentionally locked out until it re-registers.
+    await asUser(db, ALICE);
+    const before = await db.query(`select public.is_active_user() as active`);
+    expect(before.rows[0].active).toBe(false);
+
+    const messages = await db.query(`select id from public.messages`);
+    expect(messages.rows).toHaveLength(0);
+
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    const after = await db.query(`select public.is_active_user() as active`);
+    expect(after.rows[0].active).toBe(true);
+
+    await asAdmin(db);
+    const binding = await db.query(
+      `select device_id from public.device_sessions where session_id = $1`,
+      [ALICE_SESSION],
+    );
+    expect(binding.rows.map((row) => row.device_id)).toEqual([ALICE_DEVICE]);
+  });
+
   it('bootstraps pre-existing auth users and stays idempotent', async () => {
     db = await createDatabase({ migrations: MIGRATIONS.slice(0, 4) });
 

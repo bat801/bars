@@ -345,7 +345,7 @@ git push origin main
 ```bash
 npm ci
 npm run dev        # http://localhost:5173/
-npm test           # 23 теста: крипто + PostgreSQL/RLS/RPC/сессии
+npm test           # 24 теста: крипто + PostgreSQL/RLS/RPC/сессии
 npm run lint
 npm run build
 npm run preview    # проверка dist с base /bars/
