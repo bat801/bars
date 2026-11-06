@@ -28,6 +28,7 @@
    20261105090200_rpc.sql
    20261105090300_realtime.sql
    20261105090400_bootstrap.sql
+   20261106090000_device_sessions.sql
    ```
 
    CLI (`supabase/config.toml` уже в репозитории, `supabase init` не нужен):
@@ -54,13 +55,19 @@
      from pg_tables
     where schemaname = 'public'
     order by tablename;
+   select session_id, device_id, revoked_at
+     from public.device_sessions
+    order by created_at desc
+    limit 5;
    ```
 
-   Ожидается: общий чат `00000000-0000-4000-8000-000000000001`, `messages` в публикации, `rowsecurity = true` у всех таблиц.
+   Ожидается: общий чат `00000000-0000-4000-8000-000000000001`, `messages` в публикации, `rowsecurity = true` у всех таблиц, а `device_sessions` заполняется после первого входа обновлённого клиента.
 
 4. Authentication → Providers → Email: включён. **Allow new users to sign up** — выключен. Email confirmation можно оставить включённым; при ручном создании пользователей включайте **Auto Confirm User**.
 
 5. Authentication → URL Configuration: BARS не использует magic link и OAuth, поэтому redirect URLs не обязательны. Site URL можно указать как `https://<username>.github.io/bars/`.
+
+После миграции `device_sessions` уже существующие сессии M1 не имеют привязки. Это нормально: при следующей загрузке обновлённый клиент вызовет `register_device` и привяжет сессию к локальному устройству. Если клиент старый и не умеет привязку, RLS перестанет отдавать ему сообщения — сначала обновите клиент, затем применяйте миграцию.
 
 ### 2.2. Первый владелец
 
@@ -149,22 +156,39 @@ update public.profiles
 
 - Каждое устройство — отдельная пара P-256 и строка в `public.devices`.
 - Лимит активных устройств — 20 на пользователя.
-- Отзыв через интерфейс: настройки → «Устройства» → «Отозвать». После отзыва устройство не получает новые конверты, а при следующей загрузке показывает «Устройство отозвано» и не регистрируется автоматически.
+- Каждая сессия Supabase привязана к одному устройству через `public.device_sessions`.
+- Отзыв через интерфейс: настройки → «Устройства» → «Отозвать». После отзыва устройство не получает новые конверты, все его сессии помечаются `revoked_at`, а при следующей загрузке оно показывает «Устройство отозвано».
 - Повторная очистка данных сайта или приватного окна создаёт новое устройство. Старое остаётся активным, пока его не отзовут; следите за списком.
 - Отозванное устройство остаётся в таблице для проверки старых ключей отправителей, но не может обновить ключ через RPC.
 
-Посмотреть устройства:
+Посмотреть устройства и привязки:
 
 ```sql
-select d.id, d.name, d.status, d.created_at, d.last_seen_at, u.email
+select d.id, d.name, d.status, d.created_at, d.last_seen_at, u.email,
+       count(s.session_id) filter (where s.revoked_at is null) as active_sessions
   from public.devices d
   join auth.users u on u.id = d.user_id
+  left join public.device_sessions s on s.device_id = d.id
+ group by d.id, u.email
  order by u.email, d.created_at;
 ```
 
-Отозвать все устройства пользователя (например, при компрометации):
+Отозвать все устройства пользователя (например, при компрометации). Прямой SQL по `devices` не вызывает RPC, поэтому сессии нужно отозвать отдельно:
 
 ```sql
+with target_devices as (
+  select d.id
+    from public.devices d
+    join auth.users u on u.id = d.user_id
+   where u.email = 'friend@example.com'
+     and d.status = 'active'
+)
+update public.device_sessions s
+   set revoked_at = now()
+  from target_devices t
+ where s.device_id = t.id
+   and s.revoked_at is null;
+
 update public.devices d
    set status = 'revoked',
        revoked_at = now()
@@ -174,7 +198,7 @@ update public.devices d
    and d.status = 'active';
 ```
 
-Пользователь сможет войти снова после регистрации нового устройства: с другого устройства или после очистки данных сайта в отозванном браузере. Новые сообщения будут шифроваться уже для нового устройства.
+Пользователь сможет войти снова после регистрации нового устройства: с другого устройства или после очистки данных сайта в отозванном браузере. Новые сообщения будут шифроваться уже для нового устройства. Помните, что новая сессия по украденному паролю тоже сможет зарегистрировать новое устройство — подтверждение устройств появится в следующем этапе.
 
 ## 5. Повседневные проверки
 
@@ -187,6 +211,14 @@ select p.username, p.status, count(d.id) filter (where d.status = 'active') as a
   left join public.devices d on d.user_id = p.id
  group by p.id, p.username, p.status
  order by p.username;
+
+-- сессии: сколько активных привязок у каждого устройства
+select d.name, u.email, count(*) filter (where s.revoked_at is null) as active_sessions
+  from public.device_sessions s
+  join public.devices d on d.id = s.device_id
+  join auth.users u on u.id = s.user_id
+ group by d.id, d.name, u.email
+ order by u.email, d.name;
 
 -- неиспользованные приглашения
 select email, note, created_at
@@ -216,26 +248,31 @@ select * from pg_publication_tables
 
 ### Потерян или украден телефон/ноутбук
 
-1. Отзовите конкретное устройство через настройки BARS с другого устройства или SQL:
+1. Отзовите конкретное устройство через настройки BARS с другого устройства. UI вызывает `revoke_device`, который сам помечает все сессии устройства отозванными. Если действуете через SQL, сделайте оба шага:
 
    ```sql
+   update public.device_sessions
+      set revoked_at = now()
+    where device_id = '<device-uuid>'
+      and revoked_at is null;
+
    update public.devices
       set status = 'revoked', revoked_at = now()
     where id = '<device-uuid>';
    ```
 
-2. Завершите сессии Supabase этого пользователя: Dashboard → Authentication → Users → пользователь → завершить сессии. Если кнопки нет, удалите сессии через SQL Editor:
+2. Завершите сессии Supabase этого пользователя, если подозреваете кражу пароля или других устройств: Dashboard → Authentication → Users → пользователь → завершить сессии. Если кнопки нет, удалите сессии через SQL Editor:
 
    ```sql
    delete from auth.sessions
     where user_id = (select id from auth.users where email = 'friend@example.com');
    ```
 
-   Уже выданный access token может оставаться валидным до истечения (обычно до часа). После этого refresh невозможен.
+   Отозванная привязка в `device_sessions` блокирует access token немедленно, не дожидаясь истечения. Session deletion дополнительно не даёт выпустить новый токен.
 
 3. Смените пароль пользователя и передайте новый лично.
-4. Проверьте `public.devices` на незнакомые устройства и отзовите их.
-5. Помните: устройство, которому уже выданы конверты, могло прочитать соответствующие старые сообщения. Отзыв останавливает только новые. Отозванный браузер при следующей загрузке покажет «Устройство отозвано» и не зарегистрируется автоматически; чтобы снова использовать этот браузер, нужно очистить данные сайта и войти заново. Это не заменяет завершение сессий: украденная сессия всё ещё может создать новое устройство.
+4. Проверьте `public.devices` и `public.device_sessions` на незнакомые устройства и привязки, отзовите их.
+5. Помните: устройство, которому уже выданы конверты, могло прочитать соответствующие старые сообщения. Отзыв останавливает только новые. Отозванный браузер при следующей загрузке покажет «Устройство отозвано» и не зарегистрируется автоматически; чтобы снова использовать этот браузер, нужно очистить данные сайта и войти заново. Новая сессия по украденному паролю всё ещё может создать новое устройство: до появления подтверждения устройств меняйте пароль и завершайте все сессии.
 
 ### Скомпрометирован аккаунт
 
@@ -308,7 +345,7 @@ git push origin main
 ```bash
 npm ci
 npm run dev        # http://localhost:5173/
-npm test           # 19 тестов: крипто + PostgreSQL/RLS/RPC
+npm test           # 23 теста: крипто + PostgreSQL/RLS/RPC/сессии
 npm run lint
 npm run build
 npm run preview    # проверка dist с base /bars/
@@ -339,6 +376,8 @@ CSP собирается из `VITE_SUPABASE_URL`, поэтому после с�
 | Ошибка расшифровки у всех | повреждён AAD/конверт или несовпадение ключей | проверить версию клиента, `crypto_version`, не менялись ли поля сообщения |
 | CSP блокирует Supabase | в сборке другой URL, чем в `.env.local` | пересобрать с правильным `VITE_SUPABASE_URL` |
 | Устройство не регистрируется, `device_limit` | 20 активных устройств | отозвать лишние |
+| Экран «Сессия недействительна» | `session_revoked`, `session_device_mismatch` или сессия без привязки | выйти и войти снова; проверить `device_sessions` |
+| `session_required` при входе | в JWT нет `session_id` или клиент старый | обновить клиент, выйти и войти снова |
 | После очистки данных нет истории | удалён приватный ключ устройства | recovery kit появится в M1.5; сейчас история не восстановима |
 | `relation "..." does not exist` | миграции применены не по порядку | применить недостающие по порядку |
 
@@ -350,9 +389,10 @@ CSP собирается из `VITE_SUPABASE_URL`, поэтому после с�
 
 ## 10. Чек-лист перед раздачей друзьям
 
-- [ ] Миграции применены все пять, по порядку.
+- [ ] Миграции применены все шесть, по порядку.
 - [ ] `messages` в публикации `supabase_realtime`.
 - [ ] RLS включён на всех таблицах; у `anon`/`authenticated` нет write-грантов на доменные таблицы.
+- [ ] После входа в `device_sessions` появилась активная привязка, а отзыв устройства её закрывает.
 - [ ] Signup выключен, приглашения создаются вручную.
 - [ ] Первый владелец активен и видит общий чат.
 - [ ] Тестовый аккаунт друга активируется, входит и получает сообщения.

@@ -21,6 +21,15 @@ export async function signIn(email, password) {
 }
 
 export async function signOut() {
+  // Close the session->device binding before the JWT is discarded. This makes
+  // a copied token unusable immediately instead of waiting for expiry.
+  // Best-effort: local sign-out must work even without a network.
+  try {
+    await supabase.rpc('revoke_session');
+  } catch {
+    // The local session is removed below regardless.
+  }
+
   // The UI says "on this device": only revoke this session, not the others.
   // Global session termination is an administrative action (see OPERATIONS).
   const { error } = await supabase.auth.signOut({ scope: 'local' });

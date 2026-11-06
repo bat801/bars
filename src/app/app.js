@@ -12,6 +12,15 @@ import { ChatView } from '../features/chat/chat-view.js';
 
 const MOBILE_QUERY = '(max-width: 900px)';
 
+// A session whose device binding is missing, revoked or bound elsewhere can
+// only be replaced by signing in again.
+const SESSION_INVALID_CODES = new Set([
+  'session_required',
+  'session_revoked',
+  'session_device_mismatch',
+  'session_conflict',
+]);
+
 export class App {
   constructor(root) {
     this.root = root;
@@ -147,6 +156,16 @@ export class App {
           profile: this.profile,
           email: user.email,
           reason: 'device_revoked',
+        });
+        return;
+      }
+
+      if (SESSION_INVALID_CODES.has(error?.code)) {
+        this.mode = 'access';
+        this.renderAccess({
+          profile: this.profile,
+          email: user.email,
+          reason: 'session_invalid',
         });
         return;
       }

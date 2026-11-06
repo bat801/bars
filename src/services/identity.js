@@ -11,6 +11,33 @@ import {
 } from '../crypto/keystore.js';
 import * as devices from './devices.js';
 
+const IDENTITY_ERRORS = [
+  'session_required',
+  'session_revoked',
+  'session_device_mismatch',
+  'session_conflict',
+  'device_revoked',
+  'device_conflict',
+  'device_limit',
+  'invalid_public_key',
+  'invalid_device_name',
+  'access_denied',
+];
+
+/**
+ * PostgREST returns a SQLSTATE in `error.code` and the raised text in
+ * `error.message`. The client needs the stable message token, so convert it
+ * into an AppError before the session lifecycle inspects it.
+ */
+function toIdentityError(error) {
+  if (error instanceof AppError) return error;
+
+  const message = String(error?.message ?? '');
+  const code = IDENTITY_ERRORS.find((token) => message.includes(token));
+
+  return code ? new AppError(code, message) : error;
+}
+
 /**
  * Resolves the local device identity:
  * 1. reuse a stored non-extractable key if the server still knows the device;
@@ -25,8 +52,8 @@ export async function ensureDeviceIdentity(userId) {
     const server = await devices.getDevice(local.deviceId);
 
     // A revoked device must not silently mint a replacement identity on reload.
-    // The Supabase session is still valid until M1.5 adds session binding, so
-    // the honest client stops here and asks the user to use another device.
+    // The device's Supabase sessions are revoked server-side as well, but the
+    // honest client stops before making any RLS-protected request.
     if (server && server.status === 'revoked') {
       throw new AppError(
         'device_revoked',
@@ -46,14 +73,18 @@ export async function ensureDeviceIdentity(userId) {
 
       if (!local.publicKey) await saveIdentity(identity);
 
-      // Refresh last_seen_at without blocking startup.
-      devices
-        .registerDevice({
+      // Registering refreshes last_seen_at and, crucially, binds the current
+      // Supabase session to this device. It must succeed before the app makes
+      // any RLS-protected request, so this call is intentionally awaited.
+      try {
+        await devices.registerDevice({
           deviceId: local.deviceId,
           name: local.name,
           publicJwk: local.publicJwk,
-        })
-        .catch(() => {});
+        });
+      } catch (error) {
+        throw toIdentityError(error);
+      }
 
       return identity;
     }
@@ -65,11 +96,16 @@ export async function ensureDeviceIdentity(userId) {
   const deviceId = crypto.randomUUID();
   const name = detectDeviceName();
 
-  const registered = await devices.registerDevice({
-    deviceId,
-    name,
-    publicJwk: keys.publicJwk,
-  });
+  let registered;
+  try {
+    registered = await devices.registerDevice({
+      deviceId,
+      name,
+      publicJwk: keys.publicJwk,
+    });
+  } catch (error) {
+    throw toIdentityError(error);
+  }
 
   if (!registered?.id) {
     throw new AppError(

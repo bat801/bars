@@ -24,6 +24,7 @@ const MIGRATIONS = [
   '20261105090200_rpc.sql',
   '20261105090300_realtime.sql',
   '20261105090400_bootstrap.sql',
+  '20261106090000_device_sessions.sql',
 ];
 
 const ALICE = '11111111-1111-4111-8111-111111111111';
@@ -31,9 +32,21 @@ const BOB = '22222222-2222-4222-8222-222222222222';
 const CAROL = '33333333-3333-4333-8333-333333333333';
 
 const ALICE_DEVICE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const ALICE_DEVICE_2 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2';
 const BOB_DEVICE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const BOB_OLD_DEVICE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1';
 const CAROL_DEVICE = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+const ALICE_SESSION = '11111111-1111-4111-8111-111111111101';
+const ALICE_SESSION_2 = '11111111-1111-4111-8111-111111111102';
+const BOB_SESSION = '22222222-2222-4222-8222-222222222201';
+const CAROL_SESSION = '33333333-3333-4333-8333-333333333301';
+
+const SESSIONS = new Map([
+  [ALICE, ALICE_SESSION],
+  [BOB, BOB_SESSION],
+  [CAROL, CAROL_SESSION],
+]);
 
 const DEFAULT_CONVERSATION = '00000000-0000-4000-8000-000000000001';
 
@@ -73,8 +86,23 @@ async function createDatabase({ migrations = MIGRATIONS } = {}) {
       )::uuid;
     $$;
 
+    create or replace function auth.jwt()
+    returns jsonb
+    language sql
+    stable
+    as $$
+      select jsonb_build_object(
+        'sub', nullif(current_setting('request.jwt.claim.sub', true), ''),
+        'session_id', nullif(
+          current_setting('request.jwt.claim.session_id', true),
+          ''
+        )
+      );
+    $$;
+
     grant usage on schema auth to anon, authenticated;
     grant execute on function auth.uid() to anon, authenticated;
+    grant execute on function auth.jwt() to anon, authenticated;
   `);
 
   for (const file of migrations) {
@@ -98,11 +126,16 @@ async function seedUsers(instance = db) {
   `);
 }
 
-async function asUser(instance, userId) {
+async function asUser(instance, userId, sessionId = SESSIONS.get(userId)) {
   await instance.exec(`
     reset role;
     set role authenticated;
     select set_config('request.jwt.claim.sub', '${userId}', false);
+    select set_config(
+      'request.jwt.claim.session_id',
+      '${sessionId ?? ''}',
+      false
+    );
   `);
 }
 
@@ -110,6 +143,7 @@ async function asAdmin(instance) {
   await instance.exec(`
     reset role;
     select set_config('request.jwt.claim.sub', '', false);
+    select set_config('request.jwt.claim.session_id', '', false);
   `);
 }
 
@@ -388,12 +422,166 @@ describe('BARS backend migrations', () => {
     await seedUsers();
 
     await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
     const aliceView = await db.query(`select id from public.profiles order by id`);
     expect(aliceView.rows.map((row) => row.id)).toEqual([ALICE, BOB]);
 
+    // Carol is pending: she may still see her own profile, nothing else.
     await asUser(db, CAROL);
     const carolView = await db.query(`select id from public.profiles`);
     expect(carolView.rows.map((row) => row.id)).toEqual([CAROL]);
+  });
+
+  it('binds a session to exactly one device', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    await asAdmin(db);
+    const bindings = await db.query(
+      `select session_id, user_id, device_id, revoked_at
+         from public.device_sessions
+        where session_id = $1`,
+      [ALICE_SESSION],
+    );
+
+    expect(bindings.rows).toEqual([
+      {
+        session_id: ALICE_SESSION,
+        user_id: ALICE,
+        device_id: ALICE_DEVICE,
+        revoked_at: null,
+      },
+    ]);
+
+    await asUser(db, ALICE);
+    const active = await db.query(`select public.is_active_user() as active`);
+    expect(active.rows[0].active).toBe(true);
+
+    // The same JWT must not be replayed from another browser to bind a
+    // different device.
+    await expect(
+      registerDevice(db, ALICE_DEVICE_2, 'Replayed session'),
+    ).rejects.toThrow(/session_device_mismatch/);
+
+    await asAdmin(db);
+    const after = await db.query(
+      `select device_id from public.device_sessions where session_id = $1`,
+      [ALICE_SESSION],
+    );
+    expect(after.rows.map((row) => row.device_id)).toEqual([ALICE_DEVICE]);
+  });
+
+  it('requires a bound session for RLS and RPC access', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    // Simulate a token with the right subject but no session binding.
+    await asUser(db, ALICE, null);
+
+    const active = await db.query(`select public.is_active_user() as active`);
+    expect(active.rows[0].active).toBe(false);
+
+    const messages = await db.query(`select id from public.messages`);
+    expect(messages.rows).toHaveLength(0);
+
+    const keys = await db.query(`select id from public.message_keys`);
+    expect(keys.rows).toHaveLength(0);
+
+    await expect(
+      registerDevice(db, ALICE_DEVICE_2, 'No session'),
+    ).rejects.toThrow(/session_required/);
+
+    await expect(
+      sendTestMessage(db, {
+        messageId: crypto.randomUUID(),
+        deviceId: ALICE_DEVICE,
+        recipientDeviceIds: [ALICE_DEVICE],
+      }),
+    ).rejects.toThrow(/access_denied/);
+  });
+
+  it('revokes every session bound to a revoked device', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    // A second sign-in on the same device creates an independent session.
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    await asUser(db, ALICE);
+    const revoked = await db.query(
+      `select status from public.revoke_device($1)`,
+      [ALICE_DEVICE],
+    );
+    expect(revoked.rows[0].status).toBe('revoked');
+
+    await asAdmin(db);
+    const bindings = await db.query(
+      `select session_id, revoked_at
+         from public.device_sessions
+        order by session_id`,
+    );
+    expect(bindings.rows).toHaveLength(2);
+    expect(bindings.rows.every((row) => row.revoked_at !== null)).toBe(true);
+
+    // Both sessions lose access immediately, not just on the next reload.
+    await asUser(db, ALICE);
+    const active = await db.query(`select public.is_active_user() as active`);
+    expect(active.rows[0].active).toBe(false);
+
+    await expect(
+      registerDevice(db, ALICE_DEVICE, 'Alice laptop'),
+    ).rejects.toThrow(/session_revoked/);
+
+    await expect(
+      sendTestMessage(db, {
+        messageId: crypto.randomUUID(),
+        deviceId: ALICE_DEVICE,
+        recipientDeviceIds: [ALICE_DEVICE],
+      }),
+    ).rejects.toThrow(/access_denied/);
+  });
+
+  it('revokes only the current session on local sign-out', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+
+    await asUser(db, ALICE, ALICE_SESSION);
+    await db.query(`select public.revoke_session()`);
+
+    const first = await db.query(`select public.is_active_user() as active`);
+    expect(first.rows[0].active).toBe(false);
+
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    const second = await db.query(`select public.is_active_user() as active`);
+    expect(second.rows[0].active).toBe(true);
+
+    await asAdmin(db);
+    const bindings = await db.query(
+      `select session_id, (revoked_at is not null) as revoked
+         from public.device_sessions
+        order by session_id`,
+    );
+    expect(bindings.rows).toEqual([
+      { session_id: ALICE_SESSION, revoked: true },
+      { session_id: ALICE_SESSION_2, revoked: false },
+    ]);
   });
 
   it('bootstraps pre-existing auth users and stays idempotent', async () => {

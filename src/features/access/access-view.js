@@ -12,6 +12,8 @@ export class AccessView {
   mount(root) {
     const status = this.profile?.status;
     const revoked = this.reason === 'device_revoked';
+    const sessionInvalid = this.reason === 'session_invalid';
+    const terminal = revoked || sessionInvalid;
     let title = 'Доступ закрыт';
     let message =
       'Ваш аккаунт пока не активирован. Попросите администратора BARS выдать приглашение.';
@@ -20,6 +22,10 @@ export class AccessView {
       title = 'Устройство отозвано';
       message =
         'Это устройство больше не авторизовано для чтения и отправки сообщений. Используйте другое устройство либо войдите заново после очистки данных сайта.';
+    } else if (sessionInvalid) {
+      title = 'Сессия недействительна';
+      message =
+        'Эта сессия больше не привязана к текущему устройству или была завершена. Выйдите из аккаунта и войдите снова, чтобы создать новую привязку.';
     } else if (status === 'blocked') {
       title = 'Аккаунт заблокирован';
       message = 'Доступ приостановлен администратором. Если это ошибка — свяжитесь с ним напрямую.';
@@ -55,7 +61,7 @@ export class AccessView {
 
           <div class="access-actions">
             ${
-              revoked
+              terminal
                 ? ''
                 : `<button class="btn btn-primary" type="button" data-action="retry">
               <span class="btn-label">Проверить снова</span>
