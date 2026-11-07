@@ -6,6 +6,7 @@ import * as auth from '../services/auth.js';
 import * as profiles from '../services/profiles.js';
 import * as conversations from '../services/conversations.js';
 import { ensureDeviceIdentity } from '../services/identity.js';
+import { getRecoveryIdentity } from '../services/recovery.js';
 import { LoginView } from '../features/login/login-view.js';
 import { AccessView } from '../features/access/access-view.js';
 import { ChatView } from '../features/chat/chat-view.js';
@@ -134,6 +135,16 @@ export class App {
       const device = await ensureDeviceIdentity(user.id);
       if (generation !== this.generation) return;
 
+      // The recovery key is optional and local. A missing or unreadable record
+      // only means that recovery envelopes cannot be opened on this device.
+      let recovery = null;
+      try {
+        recovery = await getRecoveryIdentity(user.id);
+      } catch {
+        recovery = null;
+      }
+      if (generation !== this.generation) return;
+
       await conversations.ensureDefaultConversation();
       if (generation !== this.generation) return;
 
@@ -144,7 +155,7 @@ export class App {
       this.profile = profile;
       this.device = device;
       this.mode = 'ready';
-      this.renderChat({ profile, device, conversations: list });
+      this.renderChat({ profile, device, recovery, conversations: list });
       this.handleRoute();
     } catch (error) {
       if (generation !== this.generation) return;
@@ -222,10 +233,11 @@ export class App {
     this.accessView.mount(this.root);
   }
 
-  renderChat({ profile, device, conversations: list }) {
+  renderChat({ profile, device, recovery, conversations: list }) {
     this.chat = new ChatView({
       profile,
       device,
+      recovery,
       conversations: list,
       callbacks: {
         onSelectConversation: (conversationId) => {

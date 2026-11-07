@@ -25,6 +25,7 @@ const MIGRATIONS = [
   '20261105090300_realtime.sql',
   '20261105090400_bootstrap.sql',
   '20261106090000_device_sessions.sql',
+  '20261106091000_recovery_keys.sql',
 ];
 
 const ALICE = '11111111-1111-4111-8111-111111111111';
@@ -36,6 +37,8 @@ const ALICE_DEVICE_2 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2';
 const BOB_DEVICE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const BOB_OLD_DEVICE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1';
 const CAROL_DEVICE = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+const ALICE_RECOVERY = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9';
 
 const ALICE_SESSION = '11111111-1111-4111-8111-111111111101';
 const ALICE_SESSION_2 = '11111111-1111-4111-8111-111111111102';
@@ -151,6 +154,14 @@ async function registerDevice(instance, deviceId, name) {
   const result = await instance.query(
     `select * from public.register_device($1, $2, $3::jsonb)`,
     [deviceId, name, JSON.stringify(publicJwk)],
+  );
+  return result.rows[0];
+}
+
+async function registerRecoveryKey(instance, deviceId, jwk = publicJwk) {
+  const result = await instance.query(
+    `select * from public.register_recovery_key($1, $2::jsonb)`,
+    [deviceId, JSON.stringify(jwk)],
   );
   return result.rows[0];
 }
@@ -582,6 +593,105 @@ describe('BARS backend migrations', () => {
       { session_id: ALICE_SESSION, revoked: true },
       { session_id: ALICE_SESSION_2, revoked: false },
     ]);
+  });
+
+  it('registers one recovery key and delivers envelopes to it', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    const recovery = await registerRecoveryKey(db, ALICE_RECOVERY);
+    expect(recovery).toMatchObject({
+      id: ALICE_RECOVERY,
+      kind: 'recovery',
+      status: 'active',
+    });
+
+    // Only one active recovery key per user.
+    await expect(
+      registerRecoveryKey(db, ALICE_DEVICE_2),
+    ).rejects.toThrow(/recovery_exists/);
+
+    // Re-registering the same key is idempotent, but its public key cannot be
+    // rotated in place: that would silently redirect future recovery envelopes.
+    const again = await registerRecoveryKey(db, ALICE_RECOVERY);
+    expect(again.id).toBe(ALICE_RECOVERY);
+
+    await expect(
+      registerRecoveryKey(db, ALICE_RECOVERY, {
+        ...publicJwk,
+        x: 'C'.repeat(43),
+      }),
+    ).rejects.toThrow(/recovery_mismatch/);
+
+    // The browser-device RPC cannot rotate or take over the recovery row
+    // (use a fresh session so the binding check does not fire first).
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    await expect(
+      registerDevice(db, ALICE_RECOVERY, 'Hijack'),
+    ).rejects.toThrow(/device_conflict/);
+
+    // Bind the second session to a normal device so send_message reaches the
+    // sender-kind trigger instead of failing on access_denied.
+    await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+
+    // The recovery row is not a browser device and cannot send messages.
+    await expect(
+      sendTestMessage(db, {
+        messageId: crypto.randomUUID(),
+        deviceId: ALICE_RECOVERY,
+        recipientDeviceIds: [ALICE_DEVICE],
+      }),
+    ).rejects.toThrow(/invalid_sender_device/);
+
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    const messageId = crypto.randomUUID();
+    await sendTestMessage(db, {
+      messageId,
+      deviceId: BOB_DEVICE,
+      recipientDeviceIds: [BOB_DEVICE, ALICE_DEVICE, ALICE_RECOVERY],
+    });
+
+    await asAdmin(db);
+    const allKeys = await db.query(
+      `select device_id, recipient_kind
+         from public.message_keys
+        where message_id = $1`,
+      [messageId],
+    );
+    const allIds = allKeys.rows.map((row) => row.device_id);
+    expect(allIds).toHaveLength(3);
+    expect(allIds).toEqual(
+      expect.arrayContaining([ALICE_DEVICE, ALICE_RECOVERY, BOB_DEVICE]),
+    );
+    const recoveryRow = allKeys.rows.find(
+      (row) => row.device_id === ALICE_RECOVERY,
+    );
+    expect(recoveryRow.recipient_kind).toBe('recovery');
+
+    // Alice can see both her device envelope and her recovery envelope.
+    await asUser(db, ALICE);
+    const ownKeys = await db.query(
+      `select device_id from public.message_keys where message_id = $1`,
+      [messageId],
+    );
+    const ownIds = ownKeys.rows.map((row) => row.device_id);
+    expect(ownIds).toHaveLength(2);
+    expect(ownIds).toEqual(
+      expect.arrayContaining([ALICE_DEVICE, ALICE_RECOVERY]),
+    );
+
+    // The recovery row is not a login device: no session points at it.
+    await asAdmin(db);
+    const sessions = await db.query(
+      `select count(*)::int as total from public.device_sessions where device_id = $1`,
+      [ALICE_RECOVERY],
+    );
+    expect(sessions.rows[0].total).toBe(0);
   });
 
   it('upgrades an M1 database and binds on the next registration', async () => {

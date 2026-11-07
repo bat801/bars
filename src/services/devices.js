@@ -3,7 +3,7 @@ import { supabase } from './supabase.js';
 export async function getDevice(deviceId) {
   const { data, error } = await supabase
     .from('devices')
-    .select('id, user_id, name, public_key_jwk, status, created_at, last_seen_at')
+    .select('id, user_id, name, public_key_jwk, status, kind, created_at, last_seen_at')
     .eq('id', deviceId)
     .maybeSingle();
 
@@ -14,7 +14,7 @@ export async function getDevice(deviceId) {
 export async function listMyDevices(userId) {
   const { data, error } = await supabase
     .from('devices')
-    .select('id, user_id, name, status, created_at, last_seen_at, revoked_at')
+    .select('id, user_id, name, status, kind, created_at, last_seen_at, revoked_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: true });
 
@@ -22,10 +22,38 @@ export async function listMyDevices(userId) {
   return data ?? [];
 }
 
+export async function getMyRecoveryDevice(userId) {
+  const { data, error } = await supabase
+    .from('devices')
+    .select('id, user_id, name, public_key_jwk, status, kind, created_at, last_seen_at, revoked_at')
+    .eq('user_id', userId)
+    .eq('kind', 'recovery')
+    .eq('status', 'active')
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
 export async function registerDevice({ deviceId, name, publicJwk }) {
   const { data, error } = await supabase.rpc('register_device', {
     p_device_id: deviceId,
     p_name: name,
+    p_public_key_jwk: {
+      kty: 'EC',
+      crv: 'P-256',
+      x: publicJwk.x,
+      y: publicJwk.y,
+    },
+  });
+
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
+export async function registerRecoveryKey({ deviceId, publicJwk }) {
+  const { data, error } = await supabase.rpc('register_recovery_key', {
+    p_device_id: deviceId,
     p_public_key_jwk: {
       kty: 'EC',
       crv: 'P-256',

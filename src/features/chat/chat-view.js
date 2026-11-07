@@ -111,9 +111,10 @@ const shellTemplate = `
 `;
 
 export class ChatView {
-  constructor({ profile, device, conversations, callbacks }) {
+  constructor({ profile, device, recovery = null, conversations, callbacks }) {
     this.profile = profile;
     this.device = device;
+    this.recovery = recovery ?? null;
     this.conversations = [...conversations];
     this.callbacks = callbacks ?? {};
 
@@ -897,11 +898,27 @@ export class ChatView {
       error: null,
     };
 
-    const envelope = (row.message_keys ?? []).find(
+    const envelopes = [];
+    const deviceEnvelope = (row.message_keys ?? []).find(
       (key) => key.device_id === this.device.deviceId,
     );
+    if (deviceEnvelope) {
+      envelopes.push({ envelope: deviceEnvelope, identity: this.device });
+    }
 
-    if (!envelope) {
+    // Messages sent after the recovery kit was created also carry an envelope
+    // for the user-level recovery key. It is only usable on devices where the
+    // kit has been restored.
+    if (this.recovery && this.recovery.deviceId !== this.device.deviceId) {
+      const recoveryEnvelope = (row.message_keys ?? []).find(
+        (key) => key.device_id === this.recovery.deviceId,
+      );
+      if (recoveryEnvelope) {
+        envelopes.push({ envelope: recoveryEnvelope, identity: this.recovery });
+      }
+    }
+
+    if (envelopes.length === 0) {
       return { ...base, unavailable: 'other-device' };
     }
 
@@ -909,18 +926,42 @@ export class ChatView {
       return { ...base, unavailable: 'unknown-sender' };
     }
 
-    try {
-      const text = await decryptMessage({
-        message: row,
-        envelope,
-        senderPublicKey: senderDevice.publicKey,
-        privateKey: this.device.privateKey,
-        publicKey: this.device.publicKey,
-        deviceId: this.device.deviceId,
-      });
-      return { ...base, text };
-    } catch {
-      return { ...base, unavailable: 'decrypt' };
+    for (const candidate of envelopes) {
+      try {
+        const text = await decryptMessage({
+          message: row,
+          envelope: candidate.envelope,
+          senderPublicKey: senderDevice.publicKey,
+          privateKey: candidate.identity.privateKey,
+          publicKey: candidate.identity.publicKey,
+          deviceId: candidate.identity.deviceId,
+        });
+        return { ...base, text };
+      } catch {
+        // Try the next envelope, then report the message as unreadable.
+      }
+    }
+
+    return { ...base, unavailable: 'decrypt' };
+  }
+
+  setRecoveryIdentity(identity) {
+    this.recovery = identity ?? null;
+
+    // Server messages may become readable after a kit is restored. Keep local
+    // pending/failed messages, drop already decrypted server items and let the
+    // normal load path re-fetch them.
+    for (const state of this.states.values()) {
+      state.items = state.items.filter((item) => item.status !== 'sent');
+      state.loaded = false;
+      state.hasMore = true;
+    }
+
+    this.deviceMaps.clear();
+
+    if (this.activeId) {
+      this.renderMessages();
+      void this.loadInitial(this.activeId, { force: true });
     }
   }
 
@@ -1183,6 +1224,7 @@ export class ChatView {
         this.profile = { ...this.profile, ...profile };
         this.renderProfileCard();
       },
+      onRecoveryUpdated: (identity) => this.setRecoveryIdentity(identity),
       onLogout: () => this.callbacks.onLogout?.(),
     });
 

@@ -33,6 +33,34 @@ export async function generateDeviceKeys() {
   };
 }
 
+/**
+ * Generates the user-level recovery key pair.
+ *
+ * Unlike a device key, this key must be exported once so it can be encrypted
+ * into the recovery kit. The caller immediately imports a non-extractable copy
+ * for local use; the extractable pair is transient.
+ */
+export async function generateRecoveryKeys() {
+  assertWebCrypto();
+
+  const pair = await crypto.subtle.generateKey(EC_ALGORITHM, true, ['deriveBits']);
+  const publicJwk = await exportPublicJwk(pair.publicKey);
+  const exported = await crypto.subtle.exportKey('jwk', pair.privateKey);
+
+  return {
+    privateKey: pair.privateKey,
+    publicKey: pair.publicKey,
+    publicJwk,
+    privateJwk: {
+      kty: 'EC',
+      crv: 'P-256',
+      x: exported.x,
+      y: exported.y,
+      d: exported.d,
+    },
+  };
+}
+
 export async function exportPublicJwk(publicKey) {
   const jwk = await crypto.subtle.exportKey('jwk', publicKey);
   return {
@@ -60,6 +88,27 @@ export async function importPublicJwk(jwk) {
     EC_ALGORITHM,
     true,
     [],
+  );
+}
+
+export async function importPrivateJwk(jwk) {
+  if (
+    !jwk ||
+    jwk.kty !== 'EC' ||
+    jwk.crv !== 'P-256' ||
+    typeof jwk.x !== 'string' ||
+    typeof jwk.y !== 'string' ||
+    typeof jwk.d !== 'string'
+  ) {
+    throw new AppError('invalid_recovery_key', 'Invalid P-256 private key');
+  }
+
+  return crypto.subtle.importKey(
+    'jwk',
+    { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d },
+    EC_ALGORITHM,
+    false,
+    ['deriveBits'],
   );
 }
 

@@ -11,17 +11,24 @@ const projectRef = (() => {
 })();
 
 const DB_NAME = `bars-e2ee-${projectRef}`;
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'devices';
+const RECOVERY_STORE = 'recovery';
 
 let dbPromise = null;
 
 function getDb() {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db) {
+      upgrade(db, oldVersion) {
         if (!db.objectStoreNames.contains(STORE)) {
           db.createObjectStore(STORE, { keyPath: 'userId' });
+        }
+        if (
+          oldVersion < 2 &&
+          !db.objectStoreNames.contains(RECOVERY_STORE)
+        ) {
+          db.createObjectStore(RECOVERY_STORE, { keyPath: 'userId' });
         }
       },
     }).catch((error) => {
@@ -35,33 +42,59 @@ function getDb() {
   return dbPromise;
 }
 
-export async function loadIdentity(userId) {
+function wrapStorageError(error) {
+  if (error instanceof AppError) return error;
+  return new AppError('key_storage_failed', String(error?.message ?? error));
+}
+
+async function getRecord(store, userId) {
   try {
     const db = await getDb();
-    return await db.get(STORE, userId);
+    return await db.get(store, userId);
   } catch (error) {
-    if (error instanceof AppError) throw error;
-    throw new AppError('key_storage_failed', String(error?.message ?? error));
+    throw wrapStorageError(error);
   }
 }
 
-export async function saveIdentity(identity) {
+async function putRecord(store, identity) {
   try {
     const db = await getDb();
-    await db.put(STORE, identity);
+    await db.put(store, identity);
     return identity;
   } catch (error) {
-    if (error instanceof AppError) throw error;
-    throw new AppError('key_storage_failed', String(error?.message ?? error));
+    throw wrapStorageError(error);
   }
 }
 
-export async function deleteIdentity(userId) {
+async function deleteRecord(store, userId) {
   try {
     const db = await getDb();
-    await db.delete(STORE, userId);
+    await db.delete(store, userId);
   } catch (error) {
-    if (error instanceof AppError) throw error;
-    throw new AppError('key_storage_failed', String(error?.message ?? error));
+    throw wrapStorageError(error);
   }
+}
+
+export function loadIdentity(userId) {
+  return getRecord(STORE, userId);
+}
+
+export function saveIdentity(identity) {
+  return putRecord(STORE, identity);
+}
+
+export function deleteIdentity(userId) {
+  return deleteRecord(STORE, userId);
+}
+
+export function loadRecoveryIdentity(userId) {
+  return getRecord(RECOVERY_STORE, userId);
+}
+
+export function saveRecoveryIdentity(identity) {
+  return putRecord(RECOVERY_STORE, identity);
+}
+
+export function deleteRecoveryIdentity(userId) {
+  return deleteRecord(RECOVERY_STORE, userId);
 }

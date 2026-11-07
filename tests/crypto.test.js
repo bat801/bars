@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   generateDeviceKeys,
+  generateRecoveryKeys,
+  importPrivateJwk,
   importPublicJwk,
 } from '../src/crypto/keys.js';
 import {
   decryptMessage,
   encryptMessage,
 } from '../src/crypto/envelope.js';
+import {
+  RECOVERY_VERSION,
+  decryptRecoverySecret,
+  encryptRecoverySecret,
+} from '../src/crypto/recovery.js';
 
 const CONVERSATION_ID = '00000000-0000-4000-8000-000000000001';
 const ALICE = '11111111-1111-4111-8111-111111111111';
@@ -19,6 +26,17 @@ async function makeDevice() {
     privateKey: keys.privateKey,
     publicKey: keys.publicKey,
     publicJwk: keys.publicJwk,
+  };
+}
+
+async function makeRecovery() {
+  const keys = await generateRecoveryKeys();
+  return {
+    deviceId: crypto.randomUUID(),
+    privateKey: await importPrivateJwk(keys.privateJwk),
+    publicKey: await importPublicJwk(keys.publicJwk),
+    publicJwk: keys.publicJwk,
+    privateJwk: keys.privateJwk,
   };
 }
 
@@ -283,5 +301,140 @@ describe('BARS Envelope v1', () => {
         recipients: [],
       }),
     ).rejects.toMatchObject({ code: 'no_recipients' });
+  });
+});
+
+describe('BARS Recovery Kit v1', () => {
+  const PASSPHRASE = 'correct horse battery staple';
+
+  it('exports the recovery key once and imports a non-extractable copy', async () => {
+    const keys = await generateRecoveryKeys();
+
+    expect(keys.privateJwk).toMatchObject({ kty: 'EC', crv: 'P-256' });
+    expect(keys.privateJwk.d).toBeTruthy();
+
+    const imported = await importPrivateJwk(keys.privateJwk);
+    expect(imported.type).toBe('private');
+    expect(imported.extractable).toBe(false);
+  });
+
+  it('round-trips the encrypted recovery secret', async () => {
+    const recovery = await makeRecovery();
+    const secret = {
+      v: RECOVERY_VERSION,
+      userId: ALICE,
+      deviceId: recovery.deviceId,
+      publicJwk: recovery.publicJwk,
+      privateJwk: recovery.privateJwk,
+    };
+
+    const backup = await encryptRecoverySecret({
+      passphrase: PASSPHRASE,
+      userId: ALICE,
+      secret,
+    });
+
+    expect(backup.ciphertext).not.toContain(recovery.privateJwk.d);
+    expect(backup.kdfIterations).toBeGreaterThanOrEqual(100000);
+
+    const restored = await decryptRecoverySecret({
+      passphrase: PASSPHRASE,
+      userId: ALICE,
+      backup,
+    });
+
+    expect(restored).toEqual(secret);
+  });
+
+  it('rejects a wrong recovery passphrase', async () => {
+    const recovery = await makeRecovery();
+    const backup = await encryptRecoverySecret({
+      passphrase: PASSPHRASE,
+      userId: ALICE,
+      secret: {
+        v: RECOVERY_VERSION,
+        userId: ALICE,
+        deviceId: recovery.deviceId,
+        publicJwk: recovery.publicJwk,
+        privateJwk: recovery.privateJwk,
+      },
+    });
+
+    await expect(
+      decryptRecoverySecret({
+        passphrase: 'wrong passphrase entirely',
+        userId: ALICE,
+        backup,
+      }),
+    ).rejects.toMatchObject({ code: 'recovery_bad_passphrase' });
+  });
+
+  it('binds the backup to the account id in the AAD', async () => {
+    const recovery = await makeRecovery();
+    const backup = await encryptRecoverySecret({
+      passphrase: PASSPHRASE,
+      userId: ALICE,
+      secret: {
+        v: RECOVERY_VERSION,
+        userId: ALICE,
+        deviceId: recovery.deviceId,
+        publicJwk: recovery.publicJwk,
+        privateJwk: recovery.privateJwk,
+      },
+    });
+
+    await expect(
+      decryptRecoverySecret({
+        passphrase: PASSPHRASE,
+        userId: CAROL,
+        backup,
+      }),
+    ).rejects.toMatchObject({ code: 'recovery_bad_passphrase' });
+  });
+
+  it('delivers and decrypts an envelope addressed to the recovery key', async () => {
+    const alice = await makeDevice();
+    const bob = await makeDevice();
+    const recovery = await makeRecovery();
+    const messageId = crypto.randomUUID();
+    const text = 'Сообщение, которое переживёт потерю устройства.';
+
+    const payload = await encryptMessage({
+      text,
+      conversationId: CONVERSATION_ID,
+      messageId,
+      senderId: ALICE,
+      senderDeviceId: alice.deviceId,
+      senderPrivateKey: alice.privateKey,
+      senderPublicKey: alice.publicKey,
+      recipients: [
+        { deviceId: alice.deviceId, publicKey: alice.publicKey },
+        { deviceId: bob.deviceId, publicKey: bob.publicKey },
+        { deviceId: recovery.deviceId, publicKey: recovery.publicKey },
+      ],
+    });
+
+    const row = {
+      id: messageId,
+      conversation_id: CONVERSATION_ID,
+      sender_id: ALICE,
+      sender_device_id: alice.deviceId,
+      type: 'text',
+      crypto_version: 1,
+      ciphertext: payload.ciphertext,
+      iv: payload.iv,
+    };
+
+    const envelope = envelopeFor(payload, recovery.deviceId);
+    await expect(
+      decryptMessage({
+        message: row,
+        envelope,
+        senderPublicKey: alice.publicKey,
+        privateKey: recovery.privateKey,
+        publicKey: recovery.publicKey,
+        deviceId: recovery.deviceId,
+      }),
+    ).resolves.toBe(text);
   });
 });

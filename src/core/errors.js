@@ -21,6 +21,15 @@ const KNOWN = [
   ['device_revoked', 'Это устройство отозвано. Используйте другое устройство или войдите заново после очистки данных сайта.'],
   ['device_limit', 'Достигнут лимит устройств (20).'],
   ['device_not_found', 'Устройство не найдено.'],
+  ['recovery_exists', 'Ключ восстановления уже создан. Используйте существующий файл и парольную фразу.'],
+  ['recovery_revoked', 'Этот ключ восстановления отозван. Создайте новый ключ.'],
+  ['recovery_mismatch', 'Файл не совпадает с активным ключом восстановления на сервере.'],
+  ['recovery_bad_passphrase', 'Неверная парольная фраза для ключа восстановления.'],
+  ['recovery_not_found', 'Резервная копия ключа восстановления не найдена на сервере.'],
+  ['recovery_weak_passphrase', 'Парольная фраза должна быть не короче 12 символов.'],
+  ['recovery_backup_failed', 'Не удалось сохранить резервную копию ключа на сервере.'],
+  ['invalid_recovery_kit', 'Файл ключа восстановления повреждён или не подходит.'],
+  ['invalid_recovery_key', 'Ключ восстановления повреждён.'],
   ['conversation_not_found', 'Этот диалог недоступен.'],
   ['message_too_large', 'Сообщение слишком длинное.'],
   ['empty_message', 'Сообщение не может быть пустым.'],
@@ -62,6 +71,13 @@ export function humanizeError(
   error,
   fallback = 'Что-то пошло не так. Попробуйте ещё раз.',
 ) {
+  // Client-side AppErrors carry a stable code but a developer-facing message,
+  // so match the code before scanning message text.
+  if (typeof error?.code === 'string') {
+    const match = KNOWN.find(([needle]) => needle === error.code);
+    if (match) return match[1];
+  }
+
   const text = errorText(error);
   if (!text) return fallback;
 
