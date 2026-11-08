@@ -6,10 +6,12 @@ import { icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { updateDisplayName } from '../../services/profiles.js';
 import {
+  approveDevice,
   getMyRecoveryDevice,
   listMyDevices,
   revokeDevice,
 } from '../../services/devices.js';
+import { deviceApprovalCode } from '../../crypto/device-code.js';
 import {
   createRecoveryKit,
   downloadRecoveryKit,
@@ -41,6 +43,7 @@ export class SettingsView {
     this.previousFocus = null;
     this.previousOverflow = '';
     this.devices = [];
+    this.approvalCodes = new Map();
     this.recoveryDevice = null;
     this.localRecovery = null;
   }
@@ -233,6 +236,19 @@ export class SettingsView {
           actionElement.dataset.deviceName || 'это устройство',
         );
         break;
+      case 'approve':
+        void this.handleApprove(
+          actionElement.dataset.deviceId,
+          actionElement.dataset.deviceName || 'это устройство',
+          actionElement.dataset.deviceCode || '',
+        );
+        break;
+      case 'deny':
+        void this.handleDeny(
+          actionElement.dataset.deviceId,
+          actionElement.dataset.deviceName || 'это устройство',
+        );
+        break;
       case 'download-recovery':
         void this.downloadExistingKit();
         break;
@@ -354,11 +370,29 @@ export class SettingsView {
     );
 
     try {
-      this.devices = (await listMyDevices(this.profile.id)).filter(
+      const devices = (await listMyDevices(this.profile.id)).filter(
         (device) => device.kind !== 'recovery',
       );
+
+      const pending = devices.filter((device) => device.status === 'pending');
+      const codes = await Promise.all(
+        pending.map(async (device) => {
+          try {
+            return [device.id, await deviceApprovalCode(device.public_key_jwk)];
+          } catch {
+            return [device.id, ''];
+          }
+        }),
+      );
+
+      if (this.closed) return;
+
+      this.devices = devices;
+      this.approvalCodes = new Map(codes);
       this.renderDevices();
     } catch (error) {
+      if (this.closed) return;
+
       clear(this.devicesEl);
       this.devicesEl.appendChild(
         h(
@@ -381,28 +415,89 @@ export class SettingsView {
 
   renderDevices() {
     clear(this.devicesEl);
+
     const active = this.devices.filter(
       (device) => device.status === 'active',
-    ).length;
-    this.devicesCount.textContent = `${active} ${pluralRu(active, 'активное', 'активных', 'активных')}`;
+    );
+    const pending = this.devices.filter(
+      (device) => device.status === 'pending',
+    );
+    const revoked = this.devices.filter(
+      (device) => device.status === 'revoked',
+    );
 
-    for (const device of this.devices) {
-      const isCurrent = device.id === this.currentDeviceId;
-      const revoked = device.status === 'revoked';
+    const counts = [
+      `${active.length} ${pluralRu(active.length, 'активное', 'активных', 'активных')}`,
+    ];
 
+    if (revoked.length > 0) {
+      counts.push(
+        `${revoked.length} ${pluralRu(revoked.length, 'отозванное', 'отозванных', 'отозванных')}`,
+      );
+    }
+
+    this.devicesCount.textContent = counts.join(' · ');
+
+    if (pending.length > 0) {
+      this.devicesEl.appendChild(this.buildPendingSection(pending));
+    }
+
+    if (active.length === 0) {
+      this.devicesEl.appendChild(
+        h('p', {
+          class: 'settings-hint',
+          text: 'Нет активных устройств. Одобрить новое устройство можно только с уже активного.',
+        }),
+      );
+    } else {
+      for (const device of active) {
+        this.devicesEl.appendChild(this.buildDeviceCard(device));
+      }
+    }
+
+    if (revoked.length > 0) {
       this.devicesEl.appendChild(
         h(
+          'details',
+          { class: 'device-revoked' },
+          h(
+            'summary',
+            { class: 'device-revoked-summary' },
+            `Отозванные (${revoked.length})`,
+          ),
+          h(
+            'div',
+            { class: 'device-list device-list--revoked' },
+            ...revoked.map((device) => this.buildDeviceCard(device)),
+          ),
+        ),
+      );
+    }
+  }
+
+  buildPendingSection(pending) {
+    return h(
+      'div',
+      { class: 'device-pending' },
+      h(
+        'div',
+        { class: 'device-pending-head' },
+        h('span', {
+          class: 'device-pending-title',
+          text: 'Запросы на подключение',
+        }),
+        h('span', {
+          class: 'badge badge--accent',
+          text: String(pending.length),
+        }),
+      ),
+      ...pending.map((device) => {
+        const code = this.approvalCodes.get(device.id) || '';
+
+        return h(
           'div',
-          {
-            class: [
-              'device-card',
-              isCurrent ? 'device-card--current' : '',
-              revoked ? 'device-card--revoked' : '',
-            ]
-              .filter(Boolean)
-              .join(' '),
-          },
-          h('span', { class: 'device-icon', html: icon('devices') }),
+          { class: 'device-card device-card--pending' },
+          h('span', { class: 'device-icon', html: icon('clock') }),
           h(
             'div',
             { class: 'device-info' },
@@ -410,37 +505,105 @@ export class SettingsView {
               'div',
               { class: 'device-name-row' },
               h('span', { class: 'device-name', text: device.name }),
-              isCurrent
-                ? h('span', { class: 'badge badge--accent', text: 'это устройство' })
-                : revoked
-                  ? h('span', { class: 'badge badge--muted', text: 'отозвано' })
-                  : null,
+              h('span', { class: 'badge badge--accent', text: 'ожидает' }),
             ),
             h('span', {
               class: 'device-meta',
-              text: revoked
-                ? `Отозвано ${formatDeviceDate(device.revoked_at)}`
-                : `Создано ${formatDeviceDate(device.created_at)} · активно ${formatDeviceDate(device.last_seen_at)}`,
+              text: `Запрошено ${formatDeviceDate(device.created_at)}`,
+            }),
+            h('span', {
+              class: 'device-code',
+              text: code ? `Код: ${code}` : 'Код недоступен',
             }),
           ),
-          !isCurrent && !revoked
-            ? h(
-                'button',
-                {
-                  class: 'text-btn text-btn--danger',
-                  type: 'button',
-                  dataset: {
-                    action: 'revoke',
-                    deviceId: device.id,
-                    deviceName: device.name,
-                  },
+          h(
+            'div',
+            { class: 'device-actions' },
+            h(
+              'button',
+              {
+                class: 'text-btn',
+                type: 'button',
+                dataset: {
+                  action: 'approve',
+                  deviceId: device.id,
+                  deviceName: device.name,
+                  deviceCode: code,
                 },
-                'Отозвать',
-              )
-            : null,
+              },
+              'Одобрить',
+            ),
+            h(
+              'button',
+              {
+                class: 'text-btn text-btn--danger',
+                type: 'button',
+                dataset: {
+                  action: 'deny',
+                  deviceId: device.id,
+                  deviceName: device.name,
+                },
+              },
+              'Отклонить',
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  buildDeviceCard(device) {
+    const isCurrent = device.id === this.currentDeviceId;
+    const revoked = device.status === 'revoked';
+
+    return h(
+      'div',
+      {
+        class: [
+          'device-card',
+          isCurrent ? 'device-card--current' : '',
+          revoked ? 'device-card--revoked' : '',
+        ]
+          .filter(Boolean)
+          .join(' '),
+      },
+      h('span', { class: 'device-icon', html: icon('devices') }),
+      h(
+        'div',
+        { class: 'device-info' },
+        h(
+          'div',
+          { class: 'device-name-row' },
+          h('span', { class: 'device-name', text: device.name }),
+          isCurrent
+            ? h('span', { class: 'badge badge--accent', text: 'это устройство' })
+            : revoked
+              ? h('span', { class: 'badge badge--muted', text: 'отозвано' })
+              : null,
         ),
-      );
-    }
+        h('span', {
+          class: 'device-meta',
+          text: revoked
+            ? `Отозвано ${formatDeviceDate(device.revoked_at)}`
+            : `Создано ${formatDeviceDate(device.created_at)} · активно ${formatDeviceDate(device.last_seen_at)}`,
+        }),
+      ),
+      !isCurrent && !revoked
+        ? h(
+            'button',
+            {
+              class: 'text-btn text-btn--danger',
+              type: 'button',
+              dataset: {
+                action: 'revoke',
+                deviceId: device.id,
+                deviceName: device.name,
+              },
+            },
+            'Отозвать',
+          )
+        : null,
+    );
   }
 
   async handleRevoke(deviceId, deviceName) {
@@ -458,6 +621,46 @@ export class SettingsView {
       await this.loadDevices();
     } catch (error) {
       toast(humanizeError(error, 'Не удалось отозвать устройство.'), 'error');
+    }
+  }
+
+  async handleApprove(deviceId, deviceName, code) {
+    if (
+      !window.confirm(
+        `Подключить устройство «${deviceName}»?\n\nКод на новом устройстве: ${code || 'недоступен'}\n\nКоды должны совпадать.`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await approveDevice(deviceId);
+      toast('Устройство подключено.', 'success');
+      await this.loadDevices();
+    } catch (error) {
+      toast(
+        humanizeError(error, 'Не удалось одобрить устройство.'),
+        'error',
+      );
+      await this.loadDevices();
+    }
+  }
+
+  async handleDeny(deviceId, deviceName) {
+    if (
+      !window.confirm(
+        `Отклонить запрос устройства «${deviceName}»? Оно не получит доступ к переписке.`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await revokeDevice(deviceId);
+      toast('Запрос отклонён.', 'success');
+      await this.loadDevices();
+    } catch (error) {
+      toast(humanizeError(error, 'Не удалось отклонить запрос.'), 'error');
     }
   }
 

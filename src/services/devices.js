@@ -14,7 +14,7 @@ export async function getDevice(deviceId) {
 export async function listMyDevices(userId) {
   const { data, error } = await supabase
     .from('devices')
-    .select('id, user_id, name, status, kind, created_at, last_seen_at, revoked_at')
+    .select('id, user_id, name, public_key_jwk, status, kind, created_at, last_seen_at, revoked_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: true });
 
@@ -68,6 +68,24 @@ export async function registerRecoveryKey({ deviceId, publicJwk }) {
 
 export async function revokeDevice(deviceId) {
   const { data, error } = await supabase.rpc('revoke_device', {
+    p_device_id: deviceId,
+  });
+
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
+export async function approveDevice(deviceId) {
+  const { data, error } = await supabase.rpc('approve_device', {
+    p_device_id: deviceId,
+  });
+
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
+export async function cancelDeviceRequest(deviceId) {
+  const { data, error } = await supabase.rpc('cancel_device_request', {
     p_device_id: deviceId,
   });
 

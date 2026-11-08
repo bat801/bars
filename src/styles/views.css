@@ -273,6 +273,68 @@
   margin-top: 22px;
 }
 
+/* --------------------------------------------------------------------------
+   Pending device approval
+   -------------------------------------------------------------------------- */
+
+.access-icon--pending {
+  border-color: rgba(196, 167, 255, 0.26);
+  background: rgba(196, 167, 255, 0.1);
+  box-shadow: 0 12px 36px rgba(123, 63, 242, 0.2);
+}
+
+.device-approval {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  max-width: 320px;
+  margin: 18px auto 0;
+  padding: 14px 18px;
+  border: 1px solid rgba(196, 167, 255, 0.2);
+  border-radius: 16px;
+  background: rgba(196, 167, 255, 0.06);
+}
+
+.device-approval-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.device-approval-code {
+  color: var(--snow);
+  font-size: 24px;
+  font-weight: 750;
+  letter-spacing: 0.18em;
+  font-variant-numeric: tabular-nums;
+}
+
+.device-approval-name {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-message--hint {
+  margin-top: 12px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.pending-status {
+  min-height: 17px;
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
 @keyframes drift-one {
   from {
     transform: translate3d(0, 0, 0) scale(1);

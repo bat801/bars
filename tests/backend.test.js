@@ -26,6 +26,7 @@ const MIGRATIONS = [
   '20261105090400_bootstrap.sql',
   '20261106090000_device_sessions.sql',
   '20261106091000_recovery_keys.sql',
+  '20261107090000_device_approval.sql',
 ];
 
 const ALICE = '11111111-1111-4111-8111-111111111111';
@@ -34,6 +35,9 @@ const CAROL = '33333333-3333-4333-8333-333333333333';
 
 const ALICE_DEVICE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const ALICE_DEVICE_2 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2';
+const ALICE_DEVICE_3 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3';
+const ALICE_DEVICE_4 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4';
+const ALICE_DEVICE_5 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5';
 const BOB_DEVICE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const BOB_OLD_DEVICE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1';
 const CAROL_DEVICE = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
@@ -42,6 +46,9 @@ const ALICE_RECOVERY = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa9';
 
 const ALICE_SESSION = '11111111-1111-4111-8111-111111111101';
 const ALICE_SESSION_2 = '11111111-1111-4111-8111-111111111102';
+const ALICE_SESSION_3 = '11111111-1111-4111-8111-111111111103';
+const ALICE_SESSION_4 = '11111111-1111-4111-8111-111111111104';
+const ALICE_SESSION_5 = '11111111-1111-4111-8111-111111111105';
 const BOB_SESSION = '22222222-2222-4222-8222-222222222201';
 const CAROL_SESSION = '33333333-3333-4333-8333-333333333301';
 
@@ -154,6 +161,22 @@ async function registerDevice(instance, deviceId, name) {
   const result = await instance.query(
     `select * from public.register_device($1, $2, $3::jsonb)`,
     [deviceId, name, JSON.stringify(publicJwk)],
+  );
+  return result.rows[0];
+}
+
+async function approveDevice(instance, deviceId) {
+  const result = await instance.query(
+    `select * from public.approve_device($1)`,
+    [deviceId],
+  );
+  return result.rows[0];
+}
+
+async function cancelDeviceRequest(instance, deviceId) {
+  const result = await instance.query(
+    `select * from public.cancel_device_request($1)`,
+    [deviceId],
   );
   return result.rows[0];
 }
@@ -571,9 +594,13 @@ describe('BARS backend migrations', () => {
     await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
 
     await asUser(db, ALICE, ALICE_SESSION_2);
-    await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+    const secondDevice = await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+    expect(secondDevice.status).toBe('pending');
 
     await asUser(db, ALICE, ALICE_SESSION);
+    const approved = await approveDevice(db, ALICE_DEVICE_2);
+    expect(approved.status).toBe('active');
+
     await db.query(`select public.revoke_session()`);
 
     const first = await db.query(`select public.is_active_user() as active`);
@@ -634,8 +661,12 @@ describe('BARS backend migrations', () => {
     ).rejects.toThrow(/device_conflict/);
 
     // Bind the second session to a normal device so send_message reaches the
-    // sender-kind trigger instead of failing on access_denied.
+    // sender-kind trigger instead of failing on access_denied. A new device is
+    // pending, so the first active device must approve it.
     await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+    await asUser(db, ALICE);
+    await approveDevice(db, ALICE_DEVICE_2);
+    await asUser(db, ALICE, ALICE_SESSION_2);
 
     // The recovery row is not a browser device and cannot send messages.
     await expect(
@@ -692,6 +723,353 @@ describe('BARS backend migrations', () => {
       [ALICE_RECOVERY],
     );
     expect(sessions.rows[0].total).toBe(0);
+  });
+
+  it('keeps new devices pending until an active device approves them', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    const first = await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    expect(first).toMatchObject({ kind: 'device', status: 'active' });
+    expect(first.approved_at).not.toBeNull();
+
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    const second = await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+    expect(second).toMatchObject({
+      kind: 'device',
+      status: 'pending',
+      approved_at: null,
+    });
+
+    // A pending device is bound to its session but has no access.
+    const pendingActive = await db.query(
+      `select public.is_active_user() as active`,
+    );
+    expect(pendingActive.rows[0].active).toBe(false);
+
+    const messages = await db.query(`select id from public.messages`);
+    expect(messages.rows).toHaveLength(0);
+
+    const keys = await db.query(`select id from public.message_keys`);
+    expect(keys.rows).toHaveLength(0);
+
+    await expect(
+      db.query(`select * from public.get_conversation_devices($1)`, [
+        DEFAULT_CONVERSATION,
+      ]),
+    ).rejects.toThrow(/conversation_not_found/);
+
+    // Pending cannot approve itself, deny an active device, or send.
+    await expect(approveDevice(db, ALICE_DEVICE_2)).rejects.toThrow(
+      /access_denied/,
+    );
+
+    await expect(
+      db.query(`select * from public.revoke_device($1)`, [ALICE_DEVICE]),
+    ).rejects.toThrow(/access_denied/);
+
+    await expect(
+      sendTestMessage(db, {
+        messageId: crypto.randomUUID(),
+        deviceId: ALICE_DEVICE_2,
+        recipientDeviceIds: [ALICE_DEVICE_2],
+      }),
+    ).rejects.toThrow(/access_denied/);
+
+    // The active device sees the request, but peers do not see the pending
+    // device in the conversation directory.
+    await asUser(db, ALICE);
+    const directory = await db.query(
+      `select device_id
+         from public.get_conversation_devices($1)`,
+      [DEFAULT_CONVERSATION],
+    );
+    const directoryIds = directory.rows.map((row) => row.device_id);
+    expect(directoryIds).toContain(ALICE_DEVICE);
+    expect(directoryIds).not.toContain(ALICE_DEVICE_2);
+
+    const approved = await approveDevice(db, ALICE_DEVICE_2);
+    expect(approved).toMatchObject({
+      status: 'active',
+      approved_by_device_id: ALICE_DEVICE,
+    });
+    expect(approved.approved_at).not.toBeNull();
+
+    // Approval takes effect for the already-bound pending session.
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    const activeAfter = await db.query(
+      `select public.is_active_user() as active`,
+    );
+    expect(activeAfter.rows[0].active).toBe(true);
+
+    const sent = await sendTestMessage(db, {
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE_2,
+      recipientDeviceIds: [ALICE_DEVICE, ALICE_DEVICE_2],
+    });
+    expect(sent.rows[0].sender_device_id).toBe(ALICE_DEVICE_2);
+  });
+
+  it('binds extra sessions of an already approved device immediately', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    // Re-registering the same device from a second sign-in is a session
+    // refresh, not a new device, so it must stay active.
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    const again = await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    expect(again.status).toBe('active');
+
+    const active = await db.query(`select public.is_active_user() as active`);
+    expect(active.rows[0].active).toBe(true);
+
+    await asAdmin(db);
+    const bindings = await db.query(
+      `select session_id, device_id, revoked_at
+         from public.device_sessions
+        order by session_id`,
+    );
+    expect(bindings.rows).toEqual([
+      {
+        session_id: ALICE_SESSION,
+        device_id: ALICE_DEVICE,
+        revoked_at: null,
+      },
+      {
+        session_id: ALICE_SESSION_2,
+        device_id: ALICE_DEVICE,
+        revoked_at: null,
+      },
+    ]);
+  });
+
+  it('does not deliver envelopes to pending devices', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    const pending = await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+    expect(pending.status).toBe('pending');
+
+    await asUser(db, ALICE);
+    const firstId = crypto.randomUUID();
+    await sendTestMessage(db, {
+      messageId: firstId,
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, ALICE_DEVICE_2, BOB_DEVICE],
+    });
+
+    await asAdmin(db);
+    const before = await db.query(
+      `select device_id
+         from public.message_keys
+        where message_id = $1
+        order by device_id`,
+      [firstId],
+    );
+    expect(before.rows.map((row) => row.device_id)).toEqual([
+      ALICE_DEVICE,
+      BOB_DEVICE,
+    ]);
+
+    await asUser(db, ALICE);
+    await approveDevice(db, ALICE_DEVICE_2);
+
+    const secondId = crypto.randomUUID();
+    await sendTestMessage(db, {
+      messageId: secondId,
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, ALICE_DEVICE_2, BOB_DEVICE],
+    });
+
+    await asAdmin(db);
+    const after = await db.query(
+      `select device_id
+         from public.message_keys
+        where message_id = $1
+        order by device_id`,
+      [secondId],
+    );
+    const afterIds = after.rows.map((row) => row.device_id);
+    expect(afterIds).toHaveLength(3);
+    expect(afterIds).toEqual(
+      expect.arrayContaining([ALICE_DEVICE, ALICE_DEVICE_2, BOB_DEVICE]),
+    );
+  });
+
+  it('denies and cancels pending device requests', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    await registerDevice(db, ALICE_DEVICE_2, 'Alice phone');
+
+    // Deny from the active device.
+    await asUser(db, ALICE);
+    const denied = await db.query(
+      `select * from public.revoke_device($1)`,
+      [ALICE_DEVICE_2],
+    );
+    expect(denied.rows[0].status).toBe('revoked');
+
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    const afterDeny = await db.query(
+      `select public.is_active_user() as active`,
+    );
+    expect(afterDeny.rows[0].active).toBe(false);
+
+    await expect(
+      registerDevice(db, ALICE_DEVICE_2, 'Alice phone'),
+    ).rejects.toThrow(/session_revoked/);
+
+    // A pending device can cancel its own request.
+    await asUser(db, ALICE, ALICE_SESSION_3);
+    await registerDevice(db, ALICE_DEVICE_3, 'Alice tablet');
+
+    // Another session cannot cancel a request it does not own.
+    await asUser(db, ALICE, ALICE_SESSION_4);
+    await expect(
+      cancelDeviceRequest(db, ALICE_DEVICE_3),
+    ).rejects.toThrow(/session_device_mismatch/);
+
+    await asUser(db, ALICE, ALICE_SESSION_3);
+    const cancelled = await cancelDeviceRequest(db, ALICE_DEVICE_3);
+    expect(cancelled.status).toBe('revoked');
+
+    const afterCancel = await db.query(
+      `select public.is_active_user() as active`,
+    );
+    expect(afterCancel.rows[0].active).toBe(false);
+  });
+
+  it('limits the number of pending device requests', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    for (const [session, deviceId, name] of [
+      [ALICE_SESSION_2, ALICE_DEVICE_2, 'Alice phone'],
+      [ALICE_SESSION_3, ALICE_DEVICE_3, 'Alice tablet'],
+      [ALICE_SESSION_4, ALICE_DEVICE_4, 'Alice work laptop'],
+    ]) {
+      await asUser(db, ALICE, session);
+      const device = await registerDevice(db, deviceId, name);
+      expect(device.status).toBe('pending');
+    }
+
+    await asUser(db, ALICE, ALICE_SESSION_5);
+    await expect(
+      registerDevice(db, ALICE_DEVICE_5, 'Alice spare phone'),
+    ).rejects.toThrow(/device_pending_limit/);
+
+    // Denying one request frees a slot.
+    await asUser(db, ALICE);
+    await db.query(`select * from public.revoke_device($1)`, [ALICE_DEVICE_2]);
+
+    await asUser(db, ALICE, ALICE_SESSION_5);
+    const replacement = await registerDevice(
+      db,
+      ALICE_DEVICE_5,
+      'Alice spare phone',
+    );
+    expect(replacement.status).toBe('pending');
+  });
+
+  it('activates the next device inside an owner reset window', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+
+    // The window is ignored while an active device still exists.
+    await asAdmin(db);
+    await db.exec(`
+      update public.profiles
+         set device_reset_until = now() + interval '15 minutes'
+       where id = '${ALICE}';
+    `);
+
+    await asUser(db, ALICE, ALICE_SESSION_2);
+    const whileActive = await registerDevice(
+      db,
+      ALICE_DEVICE_2,
+      'Alice phone',
+    );
+    expect(whileActive.status).toBe('pending');
+
+    // All devices lost: revoke everything and open the window.
+    await asAdmin(db);
+    await db.exec(`
+      update public.device_sessions
+         set revoked_at = now()
+       where user_id = '${ALICE}'
+         and revoked_at is null;
+
+      update public.devices
+         set status = 'revoked', revoked_at = now()
+       where user_id = '${ALICE}'
+         and status in ('active', 'pending');
+
+      update public.profiles
+         set device_reset_until = now() + interval '15 minutes'
+       where id = '${ALICE}';
+    `);
+
+    await asUser(db, ALICE, ALICE_SESSION_3);
+    const recovered = await registerDevice(
+      db,
+      ALICE_DEVICE_3,
+      'Alice replacement',
+    );
+    expect(recovered.status).toBe('active');
+
+    const reset = await db.query(
+      `select device_reset_until from public.profiles where id = $1`,
+      [ALICE],
+    );
+    expect(reset.rows[0].device_reset_until).toBeNull();
+
+    // A consumed window does not make later devices active.
+    await asUser(db, ALICE, ALICE_SESSION_4);
+    const next = await registerDevice(db, ALICE_DEVICE_4, 'Alice tablet');
+    expect(next.status).toBe('pending');
+
+    // An expired window is ignored too.
+    await asAdmin(db);
+    await db.exec(`
+      update public.device_sessions
+         set revoked_at = now()
+       where user_id = '${ALICE}'
+         and revoked_at is null;
+
+      update public.devices
+         set status = 'revoked', revoked_at = now()
+       where user_id = '${ALICE}'
+         and status in ('active', 'pending');
+
+      update public.profiles
+         set device_reset_until = now() - interval '1 minute'
+       where id = '${ALICE}';
+    `);
+
+    await asUser(db, ALICE, ALICE_SESSION_5);
+    const expired = await registerDevice(db, ALICE_DEVICE_5, 'Alice spare');
+    expect(expired.status).toBe('pending');
   });
 
   it('upgrades an M1 database and binds on the next registration', async () => {

@@ -5,10 +5,13 @@ import { toast } from '../components/toast.js';
 import * as auth from '../services/auth.js';
 import * as profiles from '../services/profiles.js';
 import * as conversations from '../services/conversations.js';
-import { ensureDeviceIdentity } from '../services/identity.js';
+import * as devices from '../services/devices.js';
+import { ensureDeviceIdentity, forgetDeviceIdentity } from '../services/identity.js';
 import { getRecoveryIdentity } from '../services/recovery.js';
+import { deviceApprovalCode } from '../crypto/device-code.js';
 import { LoginView } from '../features/login/login-view.js';
 import { AccessView } from '../features/access/access-view.js';
+import { PendingView } from '../features/pending/pending-view.js';
 import { ChatView } from '../features/chat/chat-view.js';
 
 const MOBILE_QUERY = '(max-width: 900px)';
@@ -34,6 +37,8 @@ export class App {
     this.loadingUserId = null;
     this.loginView = null;
     this.accessView = null;
+    this.pendingView = null;
+    this.pendingCode = null;
     this.chat = null;
   }
 
@@ -102,7 +107,7 @@ export class App {
     if (
       !force &&
       this.userId === user.id &&
-      ['ready', 'access', 'error'].includes(this.mode)
+      ['ready', 'access', 'pending', 'error'].includes(this.mode)
     ) {
       return;
     }
@@ -134,6 +139,19 @@ export class App {
 
       const device = await ensureDeviceIdentity(user.id);
       if (generation !== this.generation) return;
+
+      if (device.status === 'pending') {
+        const code = await deviceApprovalCode(device.publicJwk);
+        if (generation !== this.generation) return;
+
+        this.userId = user.id;
+        this.profile = profile;
+        this.device = device;
+        this.pendingCode = code;
+        this.mode = 'pending';
+        this.renderPending({ profile, email: user.email, device, code });
+        return;
+      }
 
       // The recovery key is optional and local. A missing or unreadable record
       // only means that recovery envelopes cannot be opened on this device.
@@ -195,6 +213,9 @@ export class App {
     this.loginView = null;
     this.accessView?.destroy();
     this.accessView = null;
+    this.pendingView?.destroy();
+    this.pendingView = null;
+    this.pendingCode = null;
     clear(this.root);
   }
 
@@ -231,6 +252,54 @@ export class App {
       onLogout: () => this.logout(),
     });
     this.accessView.mount(this.root);
+  }
+
+  renderPending({ profile, email, device, code }) {
+    this.pendingView = new PendingView({
+      profile,
+      email,
+      device,
+      code,
+      onCheck: () => this.checkPendingDevice(),
+      onCancel: () => this.cancelPendingDevice(),
+      onLogout: () => this.logout(),
+    });
+    this.pendingView.mount(this.root);
+  }
+
+  async checkPendingDevice() {
+    if (!this.device?.deviceId || !this.session) {
+      return { status: 'pending' };
+    }
+
+    const server = await devices.getDevice(this.device.deviceId);
+
+    if (!server || server.status === 'revoked') {
+      this.reset();
+      this.mode = 'access';
+      this.renderAccess({
+        profile: this.profile,
+        email: this.session.user?.email,
+        reason: 'device_revoked',
+      });
+      return { status: 'revoked' };
+    }
+
+    if (server.status === 'active') {
+      await this.applySession(this.session, { force: true });
+      return { status: 'active' };
+    }
+
+    return { status: 'pending' };
+  }
+
+  async cancelPendingDevice() {
+    await devices.cancelDeviceRequest(this.device.deviceId);
+
+    // The server row is revoked; drop the local key so the next sign-in creates
+    // a fresh request instead of showing the "device revoked" screen.
+    await forgetDeviceIdentity(this.userId);
+    await this.logout();
   }
 
   renderChat({ profile, device, recovery, conversations: list }) {

@@ -19,6 +19,8 @@ const IDENTITY_ERRORS = [
   'device_revoked',
   'device_conflict',
   'device_limit',
+  'device_pending',
+  'device_pending_limit',
   'invalid_public_key',
   'invalid_device_name',
   'access_denied',
@@ -63,7 +65,7 @@ export async function ensureDeviceIdentity(userId) {
 
     if (
       server &&
-      server.status === 'active' &&
+      (server.status === 'active' || server.status === 'pending') &&
       publicJwkMatches(server.public_key_jwk, local.publicJwk) &&
       local.privateKey
     ) {
@@ -76,8 +78,9 @@ export async function ensureDeviceIdentity(userId) {
       // Registering refreshes last_seen_at and, crucially, binds the current
       // Supabase session to this device. It must succeed before the app makes
       // any RLS-protected request, so this call is intentionally awaited.
+      let registered;
       try {
-        await devices.registerDevice({
+        registered = await devices.registerDevice({
           deviceId: local.deviceId,
           name: local.name,
           publicJwk: local.publicJwk,
@@ -86,7 +89,12 @@ export async function ensureDeviceIdentity(userId) {
         throw toIdentityError(error);
       }
 
-      return identity;
+      // A pending device keeps its local key: deleting it would create a new
+      // request and a new approval code on every reload.
+      return {
+        ...identity,
+        status: registered?.status ?? server.status,
+      };
     }
 
     await deleteIdentity(userId);
@@ -125,7 +133,16 @@ export async function ensureDeviceIdentity(userId) {
   };
 
   await saveIdentity(identity);
-  return identity;
+  return { ...identity, status: registered.status ?? 'active' };
+}
+
+/**
+ * Drops the local device key. Used when the user cancels their own pending
+ * request so the next sign-in starts a fresh request instead of hitting the
+ * "device revoked" screen.
+ */
+export function forgetDeviceIdentity(userId) {
+  return deleteIdentity(userId);
 }
 
 export function detectDeviceName() {

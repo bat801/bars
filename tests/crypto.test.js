@@ -14,6 +14,7 @@ import {
   decryptRecoverySecret,
   encryptRecoverySecret,
 } from '../src/crypto/recovery.js';
+import { deviceApprovalCode } from '../src/crypto/device-code.js';
 
 const CONVERSATION_ID = '00000000-0000-4000-8000-000000000001';
 const ALICE = '11111111-1111-4111-8111-111111111111';
@@ -436,5 +437,21 @@ describe('BARS Recovery Kit v1', () => {
         deviceId: recovery.deviceId,
       }),
     ).resolves.toBe(text);
+  });
+});
+
+describe('BARS device approval code', () => {
+  it('derives a stable, readable code from the public key only', async () => {
+    const device = await makeDevice();
+    const code = await deviceApprovalCode(device.publicJwk);
+
+    expect(code).toMatch(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
+    await expect(deviceApprovalCode(device.publicJwk)).resolves.toBe(code);
+
+    const other = await makeDevice();
+    await expect(deviceApprovalCode(other.publicJwk)).resolves.not.toBe(code);
+
+    expect(await deviceApprovalCode(null)).toBe('');
+    expect(await deviceApprovalCode({ x: 'only-x' })).toBe('');
   });
 });
