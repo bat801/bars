@@ -1,12 +1,13 @@
 import { icon, logoMark } from '../../components/icons.js';
 
 export class AccessView {
-  constructor({ profile, email, reason = null, onRetry, onLogout }) {
+  constructor({ profile, email, reason = null, onRetry, onLogout, onReset }) {
     this.profile = profile;
     this.email = email;
     this.reason = reason;
     this.onRetry = onRetry;
     this.onLogout = onLogout;
+    this.onReset = onReset;
   }
 
   mount(root) {
@@ -14,6 +15,7 @@ export class AccessView {
     const revoked = this.reason === 'device_revoked';
     const sessionInvalid = this.reason === 'session_invalid';
     const terminal = revoked || sessionInvalid;
+    const canReset = revoked && Boolean(this.onReset);
     let title = 'Доступ закрыт';
     let message =
       'Ваш аккаунт пока не активирован. Попросите администратора BARS выдать приглашение.';
@@ -21,7 +23,7 @@ export class AccessView {
     if (revoked) {
       title = 'Устройство отозвано';
       message =
-        'Это устройство больше не авторизовано для чтения и отправки сообщений. Используйте другое устройство либо войдите заново после очистки данных сайта.';
+        'Это устройство больше не авторизовано для чтения и отправки сообщений. Начните заново на этом браузере или используйте другое устройство.';
     } else if (sessionInvalid) {
       title = 'Сессия недействительна';
       message =
@@ -68,6 +70,14 @@ export class AccessView {
               <span class="spinner spinner--sm" aria-hidden="true"></span>
             </button>`
             }
+            ${
+              canReset
+                ? `<button class="btn btn-primary" type="button" data-action="reset">
+              <span class="btn-label">Начать заново на этом браузере</span>
+              <span class="spinner spinner--sm" aria-hidden="true"></span>
+            </button>`
+                : ''
+            }
             <button class="btn btn-ghost" type="button" data-action="logout">Выйти</button>
           </div>
 
@@ -85,9 +95,12 @@ export class AccessView {
     this.root = root;
     this.retry = root.querySelector('[data-action="retry"]');
     this.retryLabel = this.retry?.querySelector('.btn-label') ?? null;
+    this.reset = root.querySelector('[data-action="reset"]');
+    this.resetLabel = this.reset?.querySelector('.btn-label') ?? null;
     this.logout = root.querySelector('[data-action="logout"]');
 
     this.retry?.addEventListener('click', () => this.handleRetry());
+    this.reset?.addEventListener('click', () => void this.handleReset());
     this.logout.addEventListener('click', () => this.onLogout?.());
   }
 
@@ -103,6 +116,32 @@ export class AccessView {
       this.retry.classList.remove('is-loading');
       this.retry.disabled = false;
       this.retryLabel.textContent = 'Проверить снова';
+    }
+  }
+
+  async handleReset() {
+    if (!this.reset) return;
+
+    if (
+      !window.confirm(
+        'Удалить ключ этого устройства и выйти? Следующий вход создаст новый запрос на подключение.',
+      )
+    ) {
+      return;
+    }
+
+    this.reset.classList.add('is-loading');
+    this.reset.disabled = true;
+    this.resetLabel.textContent = 'Сбрасываем…';
+
+    try {
+      await this.onReset?.();
+    } finally {
+      if (document.contains(this.reset)) {
+        this.reset.classList.remove('is-loading');
+        this.reset.disabled = false;
+        this.resetLabel.textContent = 'Начать заново на этом браузере';
+      }
     }
   }
 

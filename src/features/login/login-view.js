@@ -1,4 +1,5 @@
 import { humanizeError } from '../../core/errors.js';
+import { APP_VERSION } from '../../core/config.js';
 import { icon, logoMark } from '../../components/icons.js';
 import { signIn } from '../../services/auth.js';
 
@@ -75,7 +76,7 @@ export class LoginView {
           </footer>
         </main>
 
-        <p class="auth-legal">BARS · Private messenger · <span>v0.1</span></p>
+        <p class="auth-legal">BARS · Private messenger · <span>v${APP_VERSION}</span></p>
       </div>
     `;
 

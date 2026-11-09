@@ -27,6 +27,7 @@ import { subscribeToMessages } from '../../services/realtime.js';
 import { importPublicJwk } from '../../crypto/keys.js';
 import { decryptMessage, encryptMessage } from '../../crypto/envelope.js';
 import { SettingsView } from '../settings/settings-view.js';
+import { ApprovalView } from '../approval/approval-view.js';
 
 const shellTemplate = `
   <div class="app" id="app-shell">
@@ -39,8 +40,9 @@ const shellTemplate = `
             <span class="brand-caption">PRIVATE MESSENGER</span>
           </span>
         </div>
-        <button class="icon-btn" type="button" data-action="settings" aria-label="Настройки">
+        <button class="icon-btn icon-btn--badge" type="button" data-action="settings" aria-label="Настройки">
           ${icon('settings')}
+          <span class="icon-badge" id="pending-badge" hidden></span>
         </button>
       </header>
 
@@ -123,6 +125,10 @@ export class ChatView {
     this.deviceMaps = new Map();
     this.unsubscribeRealtime = null;
     this.settings = null;
+    this.approval = null;
+    this.pendingCount = 0;
+    this.pendingTimer = null;
+    this.pendingToken = 0;
     this.els = null;
     this.root = null;
     this.abort = null;
@@ -148,6 +154,8 @@ export class ChatView {
       sendBtn: root.querySelector('.send-btn'),
       connection: root.querySelector('#connection'),
       connectionLabel: root.querySelector('#connection-label'),
+      settingsButton: root.querySelector('.icon-btn[data-action="settings"]'),
+      badge: root.querySelector('#pending-badge'),
     };
 
     this.els.shell.addEventListener('click', (event) => this.handleClick(event), {
@@ -187,10 +195,33 @@ export class ChatView {
     this.updateHeader();
     this.renderMessages();
 
+    this.pendingTimer = window.setInterval(() => {
+      void this.refreshPendingCount();
+    }, 30_000);
+
+    document.addEventListener(
+      'visibilitychange',
+      () => {
+        if (document.visibilityState === 'visible') {
+          void this.refreshPendingCount();
+        }
+      },
+      { signal },
+    );
+
+    void this.refreshPendingCount({ announce: true });
+
     if (!navigator.onLine) this.setConnection('offline');
   }
 
   destroy() {
+    if (this.pendingTimer !== null) {
+      window.clearInterval(this.pendingTimer);
+      this.pendingTimer = null;
+    }
+    this.pendingToken += 1;
+    this.approval?.destroy();
+    this.approval = null;
     this.unsubscribeRealtime?.();
     this.unsubscribeRealtime = null;
     this.settings?.destroy();
@@ -199,6 +230,7 @@ export class ChatView {
     this.abort = null;
     this.root?.replaceChildren();
     this.root = null;
+    this.els = null;
     document.title = 'BARS — Private Messenger';
   }
 
@@ -1211,6 +1243,43 @@ export class ChatView {
     }
   }
 
+  async refreshPendingCount({ announce = false } = {}) {
+    if (!this.els) return;
+
+    const token = ++this.pendingToken;
+    try {
+      const count = await devices.countPendingDevices(this.profile.id);
+      if (!this.els || token !== this.pendingToken) return;
+      this.applyPendingCount(count, { announce });
+    } catch {
+      // The badge is an enhancement; chat stays usable when polling fails.
+    }
+  }
+
+  applyPendingCount(count, { announce = false } = {}) {
+    if (!this.els) return;
+
+    this.pendingToken += 1;
+    const previous = this.pendingCount;
+    this.pendingCount = count;
+
+    if (this.els.badge) {
+      this.els.badge.hidden = count === 0;
+      this.els.badge.textContent = count > 9 ? '9+' : String(count);
+    }
+
+    this.els.settingsButton?.setAttribute(
+      'aria-label',
+      count > 0
+        ? `Настройки, запросов на подключение: ${count}`
+        : 'Настройки',
+    );
+
+    if (announce && previous === 0 && count > 0) {
+      toast('Новое устройство ожидает подтверждения.', 'info');
+    }
+  }
+
   openSettings() {
     if (this.settings) return;
 
@@ -1219,16 +1288,52 @@ export class ChatView {
       currentDeviceId: this.device.deviceId,
       onClose: () => {
         this.settings = null;
+        void this.refreshPendingCount();
       },
       onProfileUpdated: (profile) => {
         this.profile = { ...this.profile, ...profile };
         this.renderProfileCard();
       },
       onRecoveryUpdated: (identity) => this.setRecoveryIdentity(identity),
+      onDevicesChanged: (count) => this.applyPendingCount(count),
       onLogout: () => this.callbacks.onLogout?.(),
     });
 
     this.settings.mount();
+  }
+
+  openApproval(deviceId) {
+    if (this.approval?.deviceId === deviceId) return;
+
+    this.settings?.close();
+    this.approval?.destroy();
+    this.approval = null;
+
+    this.approval = new ApprovalView({
+      deviceId,
+      currentDeviceId: this.device.deviceId,
+      userId: this.profile.id,
+      onClose: () => {
+        this.approval = null;
+        this.callbacks.onApprovalClosed?.();
+      },
+      onResolved: () => {
+        void this.refreshPendingCount();
+      },
+    });
+
+    this.approval.mount();
+  }
+
+  closeApproval({ notify = true } = {}) {
+    if (!this.approval) return false;
+
+    const approval = this.approval;
+    this.approval = null;
+    approval.destroy();
+
+    if (notify) this.callbacks.onApprovalClosed?.();
+    return true;
   }
 }
 

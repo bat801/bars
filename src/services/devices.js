@@ -22,6 +22,18 @@ export async function listMyDevices(userId) {
   return data ?? [];
 }
 
+export async function countPendingDevices(userId) {
+  const { count, error } = await supabase
+    .from('devices')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('kind', 'device')
+    .eq('status', 'pending');
+
+  if (error) throw error;
+  return count ?? 0;
+}
+
 export async function getMyRecoveryDevice(userId) {
   const { data, error } = await supabase
     .from('devices')

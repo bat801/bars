@@ -29,6 +29,7 @@ export class SettingsView {
     onClose,
     onProfileUpdated,
     onRecoveryUpdated,
+    onDevicesChanged,
     onLogout,
   }) {
     this.profile = profile;
@@ -36,6 +37,7 @@ export class SettingsView {
     this.onClose = onClose;
     this.onProfileUpdated = onProfileUpdated;
     this.onRecoveryUpdated = onRecoveryUpdated;
+    this.onDevicesChanged = onDevicesChanged;
     this.onLogout = onLogout;
 
     this.closed = false;
@@ -46,6 +48,10 @@ export class SettingsView {
     this.approvalCodes = new Map();
     this.recoveryDevice = null;
     this.localRecovery = null;
+    this.devicesTimer = null;
+    this.devicesToken = 0;
+    this.devicesSignature = null;
+    this.pendingCount = null;
   }
 
   mount() {
@@ -182,6 +188,10 @@ export class SettingsView {
 
     void this.loadDevices();
     void this.loadRecovery();
+
+    this.devicesTimer = window.setInterval(() => {
+      void this.loadDevices({ silent: true });
+    }, 10_000);
   }
 
   destroy() {
@@ -197,6 +207,10 @@ export class SettingsView {
   teardown() {
     if (this.closed) return;
     this.closed = true;
+    if (this.devicesTimer !== null) {
+      window.clearInterval(this.devicesTimer);
+      this.devicesTimer = null;
+    }
     this.abort?.abort();
     this.abort = null;
     this.overlay?.remove();
@@ -358,16 +372,22 @@ export class SettingsView {
     }
   }
 
-  async loadDevices() {
-    clear(this.devicesEl);
-    this.devicesEl.appendChild(
-      h(
-        'div',
-        { class: 'device-loading' },
-        h('span', { class: 'spinner spinner--sm' }),
-        h('span', { text: 'Загружаем устройства…' }),
-      ),
-    );
+  async loadDevices({ silent = false } = {}) {
+    if (this.closed) return;
+
+    const token = ++this.devicesToken;
+
+    if (!silent) {
+      clear(this.devicesEl);
+      this.devicesEl.appendChild(
+        h(
+          'div',
+          { class: 'device-loading' },
+          h('span', { class: 'spinner spinner--sm' }),
+          h('span', { text: 'Загружаем устройства…' }),
+        ),
+      );
+    }
 
     try {
       const devices = (await listMyDevices(this.profile.id)).filter(
@@ -385,13 +405,25 @@ export class SettingsView {
         }),
       );
 
-      if (this.closed) return;
+      if (this.closed || token !== this.devicesToken) return;
+
+      const signature = devices
+        .map((device) => `${device.id}:${device.status}`)
+        .join('|');
+      const changed = signature !== this.devicesSignature;
 
       this.devices = devices;
       this.approvalCodes = new Map(codes);
-      this.renderDevices();
+      this.devicesSignature = signature;
+
+      if (!silent || changed) this.renderDevices();
+
+      if (pending.length !== this.pendingCount) {
+        this.pendingCount = pending.length;
+        this.onDevicesChanged?.(pending.length);
+      }
     } catch (error) {
-      if (this.closed) return;
+      if (this.closed || token !== this.devicesToken || silent) return;
 
       clear(this.devicesEl);
       this.devicesEl.appendChild(
@@ -411,6 +443,10 @@ export class SettingsView {
         ),
       );
     }
+  }
+
+  refreshDevices() {
+    void this.loadDevices({ silent: true });
   }
 
   renderDevices() {

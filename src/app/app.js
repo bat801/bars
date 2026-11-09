@@ -1,5 +1,6 @@
 import { clear } from '../core/dom.js';
 import { humanizeError } from '../core/errors.js';
+import { parseApprovalHash } from '../core/approval-link.js';
 import { icon, logoMark } from '../components/icons.js';
 import { toast } from '../components/toast.js';
 import * as auth from '../services/auth.js';
@@ -250,6 +251,7 @@ export class App {
       reason,
       onRetry: () => this.retrySession(),
       onLogout: () => this.logout(),
+      onReset: () => this.resetDeviceIdentity(),
     });
     this.accessView.mount(this.root);
   }
@@ -325,6 +327,7 @@ export class App {
           }
         },
         onLogout: () => this.logout(),
+        onApprovalClosed: () => this.handleApprovalClosed(),
       },
     });
 
@@ -390,6 +393,25 @@ export class App {
   handleRoute() {
     if (!this.chat) return;
 
+    const approvalId = parseApprovalHash(location.hash);
+
+    if (approvalId) {
+      if (approvalId === this.device?.deviceId) {
+        toast('Это текущее устройство — одобрение не требуется.', 'info');
+        const hash = this.chat.activeId
+          ? `#/chat/${this.chat.activeId}`
+          : '#/chat';
+        history.replaceState(null, '', hash);
+        this.handleRoute();
+        return;
+      }
+
+      this.chat.openApproval(approvalId);
+      return;
+    }
+
+    this.chat.closeApproval({ notify: false });
+
     const match = /^#\/chat\/([0-9a-f-]{36})$/.exec(location.hash);
 
     if (match) {
@@ -426,6 +448,33 @@ export class App {
 
     history.replaceState(null, '', `#/chat/${conversationId}`);
     this.chat.openConversation(conversationId);
+  }
+
+  handleApprovalClosed() {
+    if (!this.chat) return;
+
+    const activeId = this.chat.activeId;
+    const hash = activeId ? `#/chat/${activeId}` : '#/chat';
+
+    if (parseApprovalHash(location.hash)) {
+      history.replaceState(null, '', hash);
+    }
+
+    this.handleRoute();
+  }
+
+  async resetDeviceIdentity() {
+    try {
+      if (this.userId) {
+        await forgetDeviceIdentity(this.userId);
+      }
+      await this.logout();
+    } catch (error) {
+      toast(
+        humanizeError(error, 'Не удалось сбросить устройство.'),
+        'error',
+      );
+    }
   }
 
   isMobile() {

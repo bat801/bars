@@ -1,4 +1,7 @@
+import { renderSVG } from 'uqr';
 import { humanizeError } from '../../core/errors.js';
+import { approvalLink } from '../../core/approval-link.js';
+import { copyText } from '../../core/clipboard.js';
 import { icon, logoMark } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 
@@ -15,6 +18,7 @@ export class PendingView {
     this.email = email;
     this.device = device;
     this.code = code;
+    this.link = approvalLink(device.deviceId);
     this.onCheck = onCheck;
     this.onCancel = onCancel;
     this.onLogout = onLogout;
@@ -46,8 +50,8 @@ export class PendingView {
           <div class="access-icon access-icon--pending" aria-hidden="true">${icon('clock')}</div>
           <h1 class="access-title">Ожидает подтверждения</h1>
           <p class="access-message">
-            Аккаунт уже привязан к другому устройству. Откройте BARS на нём,
-            зайдите в настройки и одобрите запрос на подключение.
+            Аккаунт уже привязан к другому устройству. Откройте ссылку или QR
+            на активном устройстве либо одобрите запрос в настройках BARS.
           </p>
 
           <div class="device-approval">
@@ -60,6 +64,25 @@ export class PendingView {
             Код на этом экране должен совпадать с кодом в запросе на другом
             устройстве. Не одобряйте запрос, если коды отличаются.
           </p>
+
+          <div class="pending-link">
+            <div class="pending-qr" id="pending-qr" aria-label="QR-код со ссылкой для одобрения"></div>
+            <p class="pending-link-hint">
+              Отсканируйте QR камерой телефона или откройте ссылку на активном
+              устройстве.
+            </p>
+            <button class="btn btn-secondary" type="button" data-action="copy-link">
+              ${icon('copy')} Скопировать ссылку
+            </button>
+            <input
+              class="pending-link-value"
+              id="pending-link"
+              type="text"
+              readonly
+              aria-label="Ссылка для одобрения устройства"
+            />
+          </div>
+
           <p class="access-identity" id="pending-identity"></p>
           <p class="pending-status" id="pending-status" role="status"></p>
 
@@ -92,14 +115,31 @@ export class PendingView {
     this.checkLabel = this.checkButton.querySelector('.btn-label');
     this.cancelButton = root.querySelector('[data-action="cancel"]');
     this.logoutButton = root.querySelector('[data-action="logout"]');
+    this.qrEl = root.querySelector('#pending-qr');
+    this.linkInput = root.querySelector('#pending-link');
+    this.copyButton = root.querySelector('[data-action="copy-link"]');
 
     this.codeEl.textContent = this.code || '—';
     this.nameEl.textContent = this.device.name || 'Это устройство';
     this.identityEl.textContent = identity;
+    this.linkInput.value = this.link;
+
+    try {
+      this.qrEl.innerHTML = renderSVG(this.link, {
+        ecc: 'M',
+        border: 2,
+        pixelSize: 6,
+        blackColor: '#120a20',
+        whiteColor: '#ffffff',
+      });
+    } catch {
+      this.qrEl.hidden = true;
+    }
 
     this.checkButton.addEventListener('click', () => void this.check());
     this.cancelButton.addEventListener('click', () => void this.cancel());
     this.logoutButton.addEventListener('click', () => this.onLogout?.());
+    this.copyButton.addEventListener('click', () => void this.copyLink());
 
     this.timer = window.setInterval(() => {
       void this.check({ silent: true });
@@ -143,6 +183,23 @@ export class PendingView {
         this.checkButton.disabled = false;
         this.checkLabel.textContent = 'Проверить снова';
       }
+    }
+  }
+
+  async copyLink() {
+    if (this.destroyed) return;
+
+    try {
+      const copied = await copyText(this.link);
+      if (!copied) throw new Error('copy_failed');
+      toast('Ссылка скопирована.', 'success');
+    } catch {
+      this.linkInput?.focus();
+      this.linkInput?.select();
+      toast(
+        'Не удалось скопировать автоматически. Выделите ссылку и скопируйте вручную.',
+        'error',
+      );
     }
   }
 
