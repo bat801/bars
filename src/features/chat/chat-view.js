@@ -28,6 +28,7 @@ import { importPublicJwk } from '../../crypto/keys.js';
 import { decryptMessage, encryptMessage } from '../../crypto/envelope.js';
 import { SettingsView } from '../settings/settings-view.js';
 import { ApprovalView } from '../approval/approval-view.js';
+import { NewDialogView } from './new-dialog-view.js';
 
 const shellTemplate = `
   <div class="app" id="app-shell">
@@ -51,7 +52,12 @@ const shellTemplate = `
       <div class="sidebar-section">
         <div class="sidebar-section-head">
           <span>Разговоры</span>
-          <span class="sidebar-count" id="conversation-count"></span>
+          <div class="sidebar-section-tools">
+            <span class="sidebar-count" id="conversation-count"></span>
+            <button class="icon-btn icon-btn--sm" type="button" data-action="new-direct" aria-label="Новый диалог" title="Новый диалог">
+              ${icon('plus')}
+            </button>
+          </div>
         </div>
         <nav class="conversation-list" id="conversation-list" aria-label="Разговоры"></nav>
       </div>
@@ -126,6 +132,7 @@ export class ChatView {
     this.unsubscribeRealtime = null;
     this.settings = null;
     this.approval = null;
+    this.newDialog = null;
     this.pendingCount = 0;
     this.pendingTimer = null;
     this.pendingToken = 0;
@@ -222,6 +229,8 @@ export class ChatView {
     this.pendingToken += 1;
     this.approval?.destroy();
     this.approval = null;
+    this.newDialog?.destroy();
+    this.newDialog = null;
     this.unsubscribeRealtime?.();
     this.unsubscribeRealtime = null;
     this.settings?.destroy();
@@ -417,6 +426,18 @@ export class ChatView {
       const title = conversationTitle(conversation, this.profile.id);
       const isActive = conversation.id === this.activeId;
       const count = conversation.members.length;
+      const directPeer =
+        conversation.kind === 'direct'
+          ? conversation.members.find(
+              (member) => member.userId !== this.profile.id,
+            )
+          : null;
+      const preview =
+        conversation.kind === 'direct'
+          ? directPeer?.profile?.username
+            ? `@${directPeer.profile.username}`
+            : 'Личный диалог'
+          : `${count} ${pluralRu(count, 'участник', 'участника', 'участников')}`;
 
       list.appendChild(
         h(
@@ -451,7 +472,7 @@ export class ChatView {
               { class: 'conversation-bottom' },
               h('span', {
                 class: 'conversation-preview',
-                text: `${count} ${pluralRu(count, 'участник', 'участника', 'участников')}`,
+                text: preview,
               }),
               h('span', { class: 'badge badge--soft', text: 'E2EE' }),
             ),
@@ -474,11 +495,20 @@ export class ChatView {
     const title = conversationTitle(conversation, this.profile.id);
     this.els.title.textContent = title;
 
-    const count = conversation.members.length;
-    const label = memberLabel(conversation, this.profile.id);
-    this.els.subtitle.textContent = label
-      ? `${count} ${pluralRu(count, 'участник', 'участника', 'участников')} · ${label}`
-      : `${count} ${pluralRu(count, 'участник', 'участника', 'участников')}`;
+    if (conversation.kind === 'direct') {
+      const other = conversation.members.find(
+        (member) => member.userId !== this.profile.id,
+      );
+      this.els.subtitle.textContent = other?.profile?.username
+        ? `@${other.profile.username} · личный диалог`
+        : 'Личный диалог';
+    } else {
+      const count = conversation.members.length;
+      const label = memberLabel(conversation, this.profile.id);
+      this.els.subtitle.textContent = label
+        ? `${count} ${pluralRu(count, 'участник', 'участника', 'участников')} · ${label}`
+        : `${count} ${pluralRu(count, 'участник', 'участника', 'участников')}`;
+    }
 
     document.title = `${title} — BARS`;
   }
@@ -1221,6 +1251,9 @@ export class ChatView {
       case 'settings':
         this.openSettings();
         break;
+      case 'new-direct':
+        this.openNewDialog();
+        break;
       case 'logout':
         if (window.confirm('Выйти из аккаунта на этом устройстве?')) {
           this.callbacks.onLogout?.();
@@ -1283,6 +1316,8 @@ export class ChatView {
   openSettings() {
     if (this.settings) return;
 
+    this.newDialog?.close();
+
     this.settings = new SettingsView({
       profile: this.profile,
       currentDeviceId: this.device.deviceId,
@@ -1302,10 +1337,48 @@ export class ChatView {
     this.settings.mount();
   }
 
+  openNewDialog() {
+    if (this.newDialog) return;
+
+    this.settings?.close();
+    this.approval?.close();
+    this.newDialog = new NewDialogView({
+      onClose: () => {
+        this.newDialog = null;
+      },
+      onOpenConversation: (conversation) => {
+        this.upsertConversation(conversation);
+        this.callbacks.onSelectConversation?.(conversation.id);
+      },
+    });
+
+    this.newDialog.mount();
+  }
+
+  upsertConversation(conversation) {
+    const index = this.conversations.findIndex(
+      (item) => item.id === conversation.id,
+    );
+
+    if (index >= 0) {
+      this.conversations[index] = conversation;
+    } else {
+      this.conversations.push(conversation);
+    }
+
+    this.conversations.sort(
+      (a, b) =>
+        new Date(b.lastMessageAt ?? 0).getTime() -
+        new Date(a.lastMessageAt ?? 0).getTime(),
+    );
+    this.renderConversationList();
+  }
+
   openApproval(deviceId) {
     if (this.approval?.deviceId === deviceId) return;
 
     this.settings?.close();
+    this.newDialog?.close();
     this.approval?.destroy();
     this.approval = null;
 

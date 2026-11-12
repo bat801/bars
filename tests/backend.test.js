@@ -27,6 +27,7 @@ const MIGRATIONS = [
   '20261106090000_device_sessions.sql',
   '20261106091000_recovery_keys.sql',
   '20261107090000_device_approval.sql',
+  '20261112090000_direct_conversations.sql',
 ];
 
 const ALICE = '11111111-1111-4111-8111-111111111111';
@@ -190,6 +191,7 @@ async function registerRecoveryKey(instance, deviceId, jwk = publicJwk) {
 }
 
 async function sendTestMessage(instance, {
+  conversationId = DEFAULT_CONVERSATION,
   messageId,
   clientMessageId = messageId,
   deviceId,
@@ -207,7 +209,7 @@ async function sendTestMessage(instance, {
        $1, $2, $3, $4, 'text', 1::smallint, $5, $6, $7::jsonb
      )`,
     [
-      DEFAULT_CONVERSATION,
+      conversationId,
       messageId,
       clientMessageId,
       deviceId,
@@ -216,6 +218,19 @@ async function sendTestMessage(instance, {
       JSON.stringify(keys),
     ],
   );
+}
+
+async function createDirectConversation(instance, peerId) {
+  const result = await instance.query(
+    `select public.create_direct_conversation($1) as conversation_id`,
+    [peerId],
+  );
+  return result.rows[0].conversation_id;
+}
+
+async function listContacts(instance) {
+  const result = await instance.query(`select * from public.list_contacts()`);
+  return result.rows;
 }
 
 afterEach(async () => {
@@ -1070,6 +1085,203 @@ describe('BARS backend migrations', () => {
     await asUser(db, ALICE, ALICE_SESSION_5);
     const expired = await registerDevice(db, ALICE_DEVICE_5, 'Alice spare');
     expect(expired.status).toBe('pending');
+  });
+
+  it('creates one direct conversation per pair and rejects self and pending peers', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    await asUser(db, ALICE);
+    const directId = await createDirectConversation(db, BOB);
+    expect(directId).toMatch(/^[0-9a-f-]{36}$/);
+
+    // The same pair gets the same conversation in either direction.
+    const again = await createDirectConversation(db, BOB);
+    expect(again).toBe(directId);
+
+    const row = await db.query(
+      `select kind, title, direct_key
+         from public.conversations
+        where id = $1`,
+      [directId],
+    );
+    expect(row.rows[0]).toMatchObject({
+      kind: 'direct',
+      title: 'Личный диалог',
+    });
+    expect(row.rows[0].direct_key).toBe(`${ALICE}:${BOB}`);
+
+    const members = await db.query(
+      `select user_id
+         from public.conversation_members
+        where conversation_id = $1
+        order by user_id`,
+      [directId],
+    );
+    expect(members.rows.map((member) => member.user_id)).toEqual([
+      ALICE,
+      BOB,
+    ]);
+
+    await asUser(db, BOB);
+    const bobDirect = await createDirectConversation(db, ALICE);
+    expect(bobDirect).toBe(directId);
+
+    await expect(createDirectConversation(db, BOB)).rejects.toThrow(
+      /invalid_direct_peer/,
+    );
+
+    // Carol is pending and cannot call the RPC at all.
+    await asUser(db, CAROL);
+    await expect(createDirectConversation(db, ALICE)).rejects.toThrow(
+      /access_denied/,
+    );
+  });
+
+  it('lists active contacts and rejects blocked or outside users', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    // Activate Carol, but do not add her to the default conversation. She is a
+    // valid active user, yet outside Alice's closed circle.
+    await asAdmin(db);
+    await db.exec(`
+      update public.profiles
+         set status = 'active'
+       where id = '${CAROL}';
+    `);
+    await asUser(db, CAROL);
+    await registerDevice(db, CAROL_DEVICE, 'Carol phone');
+
+    await asUser(db, ALICE);
+    const before = await listContacts(db);
+    expect(before.map((contact) => contact.user_id)).toEqual([BOB]);
+    expect(before[0].direct_conversation_id).toBeNull();
+
+    const directId = await createDirectConversation(db, BOB);
+    const after = await listContacts(db);
+    expect(after).toHaveLength(1);
+    expect(after[0].direct_conversation_id).toBe(directId);
+
+    await expect(createDirectConversation(db, CAROL)).rejects.toThrow(
+      /contact_not_found/,
+    );
+
+    await asUser(db, BOB);
+    const bobContacts = await listContacts(db);
+    expect(bobContacts.map((contact) => contact.user_id)).toEqual([ALICE]);
+    expect(bobContacts[0].direct_conversation_id).toBe(directId);
+
+    // A blocked peer disappears from contacts and cannot get a new dialog.
+    await asAdmin(db);
+    await db.exec(`
+      update public.profiles
+         set status = 'blocked'
+       where id = '${BOB}';
+    `);
+
+    await asUser(db, ALICE);
+    const blocked = await listContacts(db);
+    expect(blocked).toEqual([]);
+    await expect(createDirectConversation(db, BOB)).rejects.toThrow(
+      /contact_not_found/,
+    );
+  });
+
+  it('isolates direct messages and delivers envelopes only to the pair', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    // Carol is active and has a device, but she is not in the default chat or
+    // the direct dialog. She must not see either one.
+    await asAdmin(db);
+    await db.exec(`
+      update public.profiles
+         set status = 'active'
+       where id = '${CAROL}';
+    `);
+    await asUser(db, CAROL);
+    await registerDevice(db, CAROL_DEVICE, 'Carol phone');
+
+    await asUser(db, ALICE);
+    const directId = await createDirectConversation(db, BOB);
+    const messageId = crypto.randomUUID();
+
+    await sendTestMessage(db, {
+      conversationId: directId,
+      messageId,
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE, CAROL_DEVICE],
+    });
+
+    await asAdmin(db);
+    const allKeys = await db.query(
+      `select device_id
+         from public.message_keys
+        where message_id = $1
+        order by device_id`,
+      [messageId],
+    );
+    expect(allKeys.rows.map((key) => key.device_id)).toEqual([
+      ALICE_DEVICE,
+      BOB_DEVICE,
+    ]);
+
+    await asUser(db, ALICE);
+    const directory = await db.query(
+      `select device_id
+         from public.get_conversation_devices($1)
+        order by device_id`,
+      [directId],
+    );
+    expect(directory.rows.map((row) => row.device_id)).toEqual([
+      ALICE_DEVICE,
+      BOB_DEVICE,
+    ]);
+
+    await asUser(db, BOB);
+    const bobMessages = await db.query(
+      `select id from public.messages where conversation_id = $1`,
+      [directId],
+    );
+    expect(bobMessages.rows.map((message) => message.id)).toEqual([messageId]);
+
+    const bobKeys = await db.query(
+      `select device_id from public.message_keys where message_id = $1`,
+      [messageId],
+    );
+    expect(bobKeys.rows.map((key) => key.device_id)).toEqual([BOB_DEVICE]);
+
+    await asUser(db, CAROL);
+    const conversations = await db.query(
+      `select id from public.conversations where id = $1`,
+      [directId],
+    );
+    expect(conversations.rows).toEqual([]);
+
+    const messages = await db.query(
+      `select id from public.messages where conversation_id = $1`,
+      [directId],
+    );
+    expect(messages.rows).toEqual([]);
+
+    const keys = await db.query(`select id from public.message_keys`);
+    expect(keys.rows).toEqual([]);
   });
 
   it('upgrades an M1 database and binds on the next registration', async () => {

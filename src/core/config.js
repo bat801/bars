@@ -16,7 +16,7 @@ export const SUPABASE_KEY =
   'sb_publishable_vtZ4QSdQuzfakRh7qYOpPA_TQm-0w6D';
 
 export const APP_NAME = 'BARS';
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.3.0';
 
 /** Current envelope format. Bump only together with a migration path. */
 export const CRYPTO_VERSION = 1;

@@ -123,6 +123,12 @@
   letter-spacing: 0;
 }
 
+.sidebar-section-tools {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
 .conversation-list {
   display: flex;
   flex: 1;

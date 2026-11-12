@@ -34,6 +34,26 @@ export async function listConversations() {
   return (data ?? []).map(normalizeConversation);
 }
 
+export async function getConversation(conversationId) {
+  const { data, error } = await supabase
+    .from('conversations')
+    .select(CONVERSATION_SELECT)
+    .eq('id', conversationId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data ? normalizeConversation(data) : null;
+}
+
+export async function createDirectConversation(peerId) {
+  const { data, error } = await supabase.rpc('create_direct_conversation', {
+    p_peer_id: peerId,
+  });
+
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data;
+}
+
 export function normalizeConversation(row) {
   return {
     id: row.id,
