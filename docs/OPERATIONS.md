@@ -44,7 +44,15 @@
 
    Для `db push` понадобится пароль базы. Настройки в `config.toml` действуют только на локальный стек: `enable_signup = false` там не выключает регистрацию в hosted-проекте, это делается в Dashboard (шаг 4).
 
-   Либо Dashboard → SQL Editor: каждый файл целиком, по одному.
+   Либо Dashboard → SQL Editor: каждый файл целиком, по одному. После успешного выполнения добавьте запись в историю, иначе `npx supabase db push` попытается применить файл повторно:
+
+   ```sql
+   insert into supabase_migrations.schema_migrations (version, name)
+   values ('20261112090000', 'direct_conversations')
+   on conflict (version) do nothing;
+   ```
+
+   Для каждой миграции используйте её timestamp и имя без `.sql`.
 
 3. Проверьте схему:
 
