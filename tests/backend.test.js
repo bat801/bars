@@ -28,6 +28,7 @@ const MIGRATIONS = [
   '20261106091000_recovery_keys.sql',
   '20261107090000_device_approval.sql',
   '20261112090000_direct_conversations.sql',
+  '20261114090000_conversation_reads.sql',
 ];
 
 const ALICE = '11111111-1111-4111-8111-111111111111';
@@ -230,6 +231,23 @@ async function createDirectConversation(instance, peerId) {
 
 async function listContacts(instance) {
   const result = await instance.query(`select * from public.list_contacts()`);
+  return result.rows;
+}
+
+async function markRead(instance, conversationId, seq) {
+  const result = await instance.query(
+    `select public.mark_conversation_read($1, $2)::int as last_read_seq`,
+    [conversationId, seq],
+  );
+  return result.rows[0].last_read_seq;
+}
+
+async function listUnread(instance) {
+  const result = await instance.query(
+    `select conversation_id, unread_count::int as unread_count
+       from public.list_unread_counts()
+      order by conversation_id`,
+  );
   return result.rows;
 }
 
@@ -1373,5 +1391,280 @@ describe('BARS backend migrations', () => {
     );
     expect(invite.rows[0].used_by).toBe(ALICE);
     expect(invite.rows[0].used_at).not.toBeNull();
+  });
+
+  it('backfills read state and initializes it for new members', async () => {
+    db = await createDatabase({ migrations: MIGRATIONS.slice(0, -1) });
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    await asUser(db, ALICE);
+    await sendTestMessage(db, {
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+    });
+
+    const migration = await readFile(
+      join(MIGRATIONS_DIR, '20261114090000_conversation_reads.sql'),
+      'utf8',
+    );
+    await asAdmin(db);
+    await db.exec(migration);
+
+    // Existing history is marked as read for every current member, so the
+    // upgrade does not turn old messages into a wall of unread badges.
+    await asAdmin(db);
+    const seeded = await db.query(
+      `select user_id, last_read_seq::int as last_read_seq
+         from public.conversation_reads
+        where conversation_id = $1
+        order by user_id`,
+      [DEFAULT_CONVERSATION],
+    );
+    expect(seeded.rows).toEqual([
+      { user_id: ALICE, last_read_seq: 1 },
+      { user_id: BOB, last_read_seq: 1 },
+    ]);
+
+    // A member who joins later starts at the current high-water mark.
+    await asAdmin(db);
+    await db.exec(`
+      update public.profiles set status = 'active' where id = '${CAROL}';
+    `);
+    await asUser(db, CAROL);
+    await registerDevice(db, CAROL_DEVICE, 'Carol phone');
+    await asAdmin(db);
+    await db.exec(`
+      insert into public.conversation_members (conversation_id, user_id)
+      values ('${DEFAULT_CONVERSATION}', '${CAROL}');
+    `);
+
+    const joined = await db.query(
+      `select last_read_seq::int as last_read_seq
+         from public.conversation_reads
+        where conversation_id = $1
+          and user_id = $2`,
+      [DEFAULT_CONVERSATION, CAROL],
+    );
+    expect(joined.rows[0].last_read_seq).toBe(1);
+
+    await asUser(db, ALICE);
+    await sendTestMessage(db, {
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+    });
+
+    await asUser(db, CAROL);
+    expect(await listUnread(db)).toEqual([
+      { conversation_id: DEFAULT_CONVERSATION, unread_count: 1 },
+    ]);
+  });
+
+  it('keeps read positions private and writable only through RPC', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    const aliceRows = await db.query(
+      `select user_id from public.conversation_reads`,
+    );
+    expect(aliceRows.rows.map((row) => row.user_id)).toEqual([ALICE]);
+
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+    const bobRows = await db.query(
+      `select user_id from public.conversation_reads`,
+    );
+    expect(bobRows.rows.map((row) => row.user_id)).toEqual([BOB]);
+
+    // Pending users are not active yet, so even their own row is hidden.
+    await asUser(db, CAROL);
+    const carolRows = await db.query(
+      `select user_id from public.conversation_reads`,
+    );
+    expect(carolRows.rows).toEqual([]);
+
+    await expect(
+      db.exec(`
+        insert into public.conversation_reads (
+          conversation_id, user_id, last_read_seq
+        ) values ('${DEFAULT_CONVERSATION}', '${CAROL}', 1);
+      `),
+    ).rejects.toThrow(/permission denied/i);
+
+    await expect(
+      db.exec(`update public.conversation_reads set last_read_seq = 2`),
+    ).rejects.toThrow(/permission denied/i);
+
+    await expect(
+      db.exec(`delete from public.conversation_reads`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  it('marks read monotonically, clamps to the conversation and ignores own messages', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    await asUser(db, ALICE);
+    await sendTestMessage(db, {
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+      text: 'first',
+    });
+    await sendTestMessage(db, {
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+      text: 'second',
+    });
+
+    await asUser(db, BOB);
+    await sendTestMessage(db, {
+      messageId: crypto.randomUUID(),
+      deviceId: BOB_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+      text: 'third',
+    });
+
+    // Alice has one message from Bob; Bob has two from Alice.
+    await asUser(db, ALICE);
+    expect(await listUnread(db)).toEqual([
+      { conversation_id: DEFAULT_CONVERSATION, unread_count: 1 },
+    ]);
+
+    await asUser(db, BOB);
+    expect(await listUnread(db)).toEqual([
+      { conversation_id: DEFAULT_CONVERSATION, unread_count: 2 },
+    ]);
+
+    await asUser(db, ALICE);
+    expect(await markRead(db, DEFAULT_CONVERSATION, 3)).toBe(3);
+    // A stale client cannot move the marker backwards.
+    expect(await markRead(db, DEFAULT_CONVERSATION, 1)).toBe(3);
+    // Nor can it mark messages that do not exist yet.
+    expect(await markRead(db, DEFAULT_CONVERSATION, 999)).toBe(3);
+    expect(await listUnread(db)).toEqual([]);
+
+    // Bob's position is independent from Alice's.
+    await asUser(db, BOB);
+    expect(await markRead(db, DEFAULT_CONVERSATION, 0)).toBe(0);
+    expect(await listUnread(db)).toEqual([
+      { conversation_id: DEFAULT_CONVERSATION, unread_count: 2 },
+    ]);
+    expect(await markRead(db, DEFAULT_CONVERSATION, 2)).toBe(2);
+    expect(await listUnread(db)).toEqual([]);
+  });
+
+  it('rejects read RPCs for pending, outside and revoked users', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    // Pending Carol cannot read or mark anything.
+    await asUser(db, CAROL);
+    await expect(markRead(db, DEFAULT_CONVERSATION, 1)).rejects.toThrow(
+      /access_denied/,
+    );
+    await expect(listUnread(db)).rejects.toThrow(/access_denied/);
+
+    // Active Carol is outside the closed circle and stays isolated.
+    await asAdmin(db);
+    await db.exec(`
+      update public.profiles set status = 'active' where id = '${CAROL}';
+    `);
+    await asUser(db, CAROL);
+    await registerDevice(db, CAROL_DEVICE, 'Carol phone');
+    await expect(markRead(db, DEFAULT_CONVERSATION, 1)).rejects.toThrow(
+      /access_denied/,
+    );
+    expect(await listUnread(db)).toEqual([]);
+
+    // Revoking the device invalidates the session for both RPCs.
+    await asUser(db, ALICE);
+    await db.query(`select public.revoke_device($1)`, [ALICE_DEVICE]);
+    await expect(markRead(db, DEFAULT_CONVERSATION, 1)).rejects.toThrow(
+      /access_denied/,
+    );
+    await expect(listUnread(db)).rejects.toThrow(/access_denied/);
+  });
+
+  it('counts unread per conversation and isolates an outside user', async () => {
+    db = await createDatabase();
+    await seedUsers();
+
+    await asUser(db, ALICE);
+    await registerDevice(db, ALICE_DEVICE, 'Alice laptop');
+    await asUser(db, BOB);
+    await registerDevice(db, BOB_DEVICE, 'Bob phone');
+
+    await asAdmin(db);
+    await db.exec(`
+      update public.profiles set status = 'active' where id = '${CAROL}';
+    `);
+    await asUser(db, CAROL);
+    await registerDevice(db, CAROL_DEVICE, 'Carol phone');
+
+    await asUser(db, ALICE);
+    const directId = await createDirectConversation(db, BOB);
+
+    await sendTestMessage(db, {
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+      text: 'group',
+    });
+    await sendTestMessage(db, {
+      conversationId: directId,
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+      text: 'direct one',
+    });
+    await sendTestMessage(db, {
+      conversationId: directId,
+      messageId: crypto.randomUUID(),
+      deviceId: ALICE_DEVICE,
+      recipientDeviceIds: [ALICE_DEVICE, BOB_DEVICE],
+      text: 'direct two',
+    });
+
+    await asUser(db, BOB);
+    const counts = await listUnread(db);
+    expect(counts).toHaveLength(2);
+    expect(counts).toEqual(
+      expect.arrayContaining([
+        { conversation_id: DEFAULT_CONVERSATION, unread_count: 1 },
+        { conversation_id: directId, unread_count: 2 },
+      ]),
+    );
+
+    // Alice never counts her own messages.
+    await asUser(db, ALICE);
+    expect(await listUnread(db)).toEqual([]);
+
+    // Carol sees neither conversation and cannot mark it read.
+    await asUser(db, CAROL);
+    expect(await listUnread(db)).toEqual([]);
+    await expect(markRead(db, directId, 1)).rejects.toThrow(/access_denied/);
+    await expect(markRead(db, DEFAULT_CONVERSATION, 1)).rejects.toThrow(
+      /access_denied/,
+    );
   });
 });

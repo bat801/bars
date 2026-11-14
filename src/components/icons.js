@@ -31,6 +31,7 @@ const paths = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
   message: '<path d="M20.5 11.5a8.5 8.5 0 0 1-12.6 7.4L3.5 20.5l1.6-4.4A8.5 8.5 0 1 1 20.5 11.5Z"/>',
+  bell: '<path d="M18 8.5a6 6 0 0 0-12 0c0 6.5-2.6 7.5-2.6 7.5h17.2S18 15 18 8.5Z"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/>',
 };
 
 export function icon(name, className = 'icon') {

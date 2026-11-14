@@ -2,6 +2,12 @@ import { clear, h } from '../../core/dom.js';
 import { humanizeError } from '../../core/errors.js';
 import { formatDeviceDate, pluralRu } from '../../core/format.js';
 import { MIN_PASSWORD_LENGTH } from '../../core/config.js';
+import {
+  getNotificationPermission,
+  getNotificationPreference,
+  requestNotificationPermission,
+  setNotificationPreference,
+} from '../../core/notifications.js';
 import { icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { updateDisplayName } from '../../services/profiles.js';
@@ -103,6 +109,31 @@ export class SettingsView {
 
           <section class="settings-section">
             <div class="settings-section-head">
+              <h3 class="settings-title">Уведомления</h3>
+              <span class="muted-count" id="settings-notifications-status"></span>
+            </div>
+            <div class="settings-toggle-row">
+              <span class="settings-toggle-icon" aria-hidden="true">${icon('bell')}</span>
+              <span class="settings-toggle-text">
+                <strong>Уведомления в браузере</strong>
+                <span class="settings-hint">Пока вкладка открыта. Без текста сообщений.</span>
+              </span>
+              <button
+                class="switch"
+                id="settings-notifications-toggle"
+                type="button"
+                role="switch"
+                aria-checked="false"
+                data-action="toggle-notifications"
+                aria-label="Уведомления в браузере"
+              >
+                <span class="switch-thumb" aria-hidden="true"></span>
+              </button>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-head">
               <h3 class="settings-title">Восстановление</h3>
               <span class="muted-count" id="settings-recovery-status"></span>
             </div>
@@ -162,9 +193,16 @@ export class SettingsView {
     this.devicesCount = this.overlay.querySelector('#settings-devices-count');
     this.recoveryEl = this.overlay.querySelector('#settings-recovery');
     this.recoveryStatus = this.overlay.querySelector('#settings-recovery-status');
+    this.notificationsToggle = this.overlay.querySelector(
+      '#settings-notifications-toggle',
+    );
+    this.notificationsStatus = this.overlay.querySelector(
+      '#settings-notifications-status',
+    );
 
     this.usernameEl.textContent = `@${this.profile.username}`;
     this.nameInput.value = this.profile.display_name;
+    this.refreshNotifications();
 
     this.overlay.addEventListener(
       'click',
@@ -269,8 +307,68 @@ export class SettingsView {
       case 'retry-recovery':
         void this.loadRecovery();
         break;
+      case 'toggle-notifications':
+        void this.toggleNotifications();
+        break;
       default:
         break;
+    }
+  }
+
+  refreshNotifications() {
+    if (!this.notificationsToggle) return;
+
+    const permission = getNotificationPermission();
+    const enabled = getNotificationPreference(this.profile.id);
+    const active = enabled && permission === 'granted';
+
+    this.notificationsToggle.disabled =
+      permission === 'unsupported' || permission === 'denied';
+    this.notificationsToggle.classList.toggle('is-on', active);
+    this.notificationsToggle.setAttribute('aria-checked', String(active));
+
+    let status = 'Выключены';
+    if (permission === 'unsupported') {
+      status = 'Не поддерживаются';
+    } else if (permission === 'denied') {
+      status = 'Запрещены в браузере';
+    } else if (active) {
+      status = 'Включены на устройстве';
+    }
+
+    this.notificationsStatus.textContent = status;
+  }
+
+  async toggleNotifications() {
+    if (!this.notificationsToggle || this.notificationsToggle.disabled) return;
+
+    if (getNotificationPreference(this.profile.id)) {
+      setNotificationPreference(this.profile.id, false);
+      this.refreshNotifications();
+      toast('Уведомления выключены на этом устройстве.', 'info');
+      return;
+    }
+
+    const permission = await requestNotificationPermission();
+
+    if (permission === 'granted') {
+      setNotificationPreference(this.profile.id, true);
+      this.refreshNotifications();
+      toast('Уведомления включены на этом устройстве.', 'success');
+      return;
+    }
+
+    this.refreshNotifications();
+
+    if (permission === 'denied') {
+      toast(
+        'Браузер запретил уведомления. Разрешите их в настройках сайта.',
+        'error',
+      );
+    } else if (permission === 'unsupported') {
+      toast('Этот браузер не поддерживает уведомления на странице.', 'error');
+    } else {
+      toast('Разрешение на уведомления не выдано.', 'info');
     }
   }
 

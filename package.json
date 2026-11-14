@@ -1,7 +1,7 @@
 {
   "name": "bars",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "BARS — private end-to-end encrypted messenger",
   "scripts": {

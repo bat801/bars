@@ -196,6 +196,36 @@
   font-size: 10px;
 }
 
+.conversation-aside {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.conversation-unread {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--electric), var(--electric-deep));
+  box-shadow: 0 0 14px rgba(123, 63, 242, 0.42);
+  color: var(--snow);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.conversation.has-unread .conversation-title {
+  color: var(--snow);
+}
+
+.conversation.has-unread .conversation-preview {
+  color: var(--text-muted);
+}
+
 .conversation-bottom {
   display: flex;
   align-items: center;

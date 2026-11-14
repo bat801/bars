@@ -24,11 +24,32 @@ import {
 } from '../../services/messages.js';
 import * as devices from '../../services/devices.js';
 import { subscribeToMessages } from '../../services/realtime.js';
+import {
+  listUnreadCounts,
+  markConversationRead,
+} from '../../services/reads.js';
+import {
+  claimNotification,
+  getNotificationPermission,
+  getNotificationPreference,
+  notificationText,
+  showBrowserNotification,
+  shouldNotify,
+} from '../../core/notifications.js';
 import { importPublicJwk } from '../../crypto/keys.js';
 import { decryptMessage, encryptMessage } from '../../crypto/envelope.js';
 import { SettingsView } from '../settings/settings-view.js';
 import { ApprovalView } from '../approval/approval-view.js';
 import { NewDialogView } from './new-dialog-view.js';
+import {
+  clearUnread,
+  formatUnreadCount,
+  incrementUnread,
+  maxSeq,
+  totalUnread,
+  unreadDocumentTitle,
+  unreadFromRows,
+} from './unread.js';
 
 const shellTemplate = `
   <div class="app" id="app-shell">
@@ -129,6 +150,11 @@ export class ChatView {
     this.activeId = null;
     this.states = new Map();
     this.deviceMaps = new Map();
+    this.unread = new Map();
+    this.readMarkers = new Map();
+    this.seenIncoming = new Set();
+    this.unreadToken = 0;
+    this.baseDocumentTitle = 'BARS — Private Messenger';
     this.unsubscribeRealtime = null;
     this.settings = null;
     this.approval = null;
@@ -187,6 +213,7 @@ export class ChatView {
       () => {
         this.setConnection('connecting');
         if (this.activeId) void this.syncLatest(this.activeId);
+        void this.refreshUnreadCounts();
       },
       { signal },
     );
@@ -196,6 +223,8 @@ export class ChatView {
       () => this.setConnection('offline'),
       { signal },
     );
+
+    window.addEventListener('focus', () => this.handleAttention(), { signal });
 
     this.renderProfileCard();
     this.renderConversationList();
@@ -211,12 +240,15 @@ export class ChatView {
       () => {
         if (document.visibilityState === 'visible') {
           void this.refreshPendingCount();
+          this.handleAttention();
         }
       },
       { signal },
     );
 
     void this.refreshPendingCount({ announce: true });
+    void this.refreshUnreadCounts();
+    this.subscribe();
 
     if (!navigator.onLine) this.setConnection('offline');
   }
@@ -227,6 +259,10 @@ export class ChatView {
       this.pendingTimer = null;
     }
     this.pendingToken += 1;
+    this.unreadToken += 1;
+    this.unread.clear();
+    this.readMarkers.clear();
+    this.seenIncoming.clear();
     this.approval?.destroy();
     this.approval = null;
     this.newDialog?.destroy();
@@ -293,9 +329,10 @@ export class ChatView {
     this.els.shell.classList.add('is-chat-open');
 
     const state = this.ensureState(conversationId);
+    const wasUnread = this.unread.has(conversationId);
+    this.unread = clearUnread(this.unread, conversationId);
 
     if (switched) {
-      this.subscribe(conversationId);
       this.renderConversationList();
       this.updateHeader();
       this.els.input.value = '';
@@ -309,18 +346,27 @@ export class ChatView {
         this.renderMessages({ scrollBottom: true });
         void this.syncLatest(conversationId);
       }
-    } else if (!state.loaded && !state.loading) {
-      this.renderMessages();
-      void this.loadInitial(conversationId);
+    } else {
+      if (wasUnread) {
+        this.renderConversationList();
+        this.updateHeader();
+      }
+
+      if (!state.loaded && !state.loading) {
+        this.renderMessages();
+        void this.loadInitial(conversationId);
+      }
     }
+
+    if (state.loaded) void this.markActiveRead(conversationId);
 
     return true;
   }
 
   closeConversation() {
+    if (this.activeId) void this.markActiveRead(this.activeId);
+
     this.activeId = null;
-    this.unsubscribeRealtime?.();
-    this.unsubscribeRealtime = null;
     this.els.shell.classList.remove('is-chat-open');
     this.renderConversationList();
     this.updateHeader();
@@ -328,27 +374,21 @@ export class ChatView {
     this.setConnection('connecting');
   }
 
-  subscribe(conversationId) {
+  subscribe() {
     this.unsubscribeRealtime?.();
     this.unsubscribeRealtime = null;
     this.setConnection('connecting');
 
-    let wasSubscribed = false;
-
-    this.unsubscribeRealtime = subscribeToMessages(conversationId, {
-      onMessage: (row) => {
-        if (this.activeId === conversationId) {
-          void this.handleIncoming(row);
-        }
-      },
+    this.unsubscribeRealtime = subscribeToMessages({
+      onMessage: (row) => this.handleRealtimeMessage(row),
       onStatus: (status) => {
-        if (this.activeId !== conversationId) return;
-
         if (status === 'SUBSCRIBED') {
-          const reconnected = wasSubscribed;
-          wasSubscribed = true;
           this.setConnection('online');
-          if (reconnected) void this.syncLatest(conversationId);
+          // Recover anything inserted while the channel was connecting or
+          // reconnecting. The unread RPC also catches messages in background
+          // conversations that Realtime could not replay.
+          if (this.activeId) void this.syncLatest(this.activeId);
+          void this.refreshUnreadCounts();
         } else if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(status)) {
           this.setConnection('reconnecting');
         }
@@ -425,6 +465,7 @@ export class ChatView {
     for (const conversation of this.conversations) {
       const title = conversationTitle(conversation, this.profile.id);
       const isActive = conversation.id === this.activeId;
+      const unread = this.unread.get(conversation.id) ?? 0;
       const count = conversation.members.length;
       const directPeer =
         conversation.kind === 'direct'
@@ -443,7 +484,7 @@ export class ChatView {
         h(
           'button',
           {
-            class: `conversation${isActive ? ' is-active' : ''}`,
+            class: `conversation${isActive ? ' is-active' : ''}${unread > 0 ? ' has-unread' : ''}`,
             type: 'button',
             dataset: { conversationId: conversation.id },
             attrs: {
@@ -462,10 +503,28 @@ export class ChatView {
               'span',
               { class: 'conversation-top' },
               h('span', { class: 'conversation-title', text: title }),
-              h('span', {
-                class: 'conversation-time',
-                text: formatListTime(conversation.lastMessageAt),
-              }),
+              h(
+                'span',
+                { class: 'conversation-aside' },
+                h('span', {
+                  class: 'conversation-time',
+                  text: formatListTime(conversation.lastMessageAt),
+                }),
+                unread > 0
+                  ? h('span', {
+                      class: 'conversation-unread',
+                      text: formatUnreadCount(unread),
+                      attrs: {
+                        'aria-label': `${unread} ${pluralRu(
+                          unread,
+                          'непрочитанное сообщение',
+                          'непрочитанных сообщения',
+                          'непрочитанных сообщений',
+                        )}`,
+                      },
+                    })
+                  : null,
+              ),
             ),
             h(
               'span',
@@ -488,7 +547,8 @@ export class ChatView {
     if (!conversation) {
       this.els.title.textContent = 'BARS';
       this.els.subtitle.textContent = 'Приватный мессенджер';
-      document.title = 'BARS — Private Messenger';
+      this.baseDocumentTitle = 'BARS — Private Messenger';
+      this.updateDocumentTitle();
       return;
     }
 
@@ -510,7 +570,15 @@ export class ChatView {
         : `${count} ${pluralRu(count, 'участник', 'участника', 'участников')}`;
     }
 
-    document.title = `${title} — BARS`;
+    this.baseDocumentTitle = `${title} — BARS`;
+    this.updateDocumentTitle();
+  }
+
+  updateDocumentTitle() {
+    document.title = unreadDocumentTitle(
+      this.baseDocumentTitle,
+      totalUnread(this.unread),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -786,6 +854,7 @@ export class ChatView {
 
       if (this.activeId === conversationId) {
         this.renderMessages({ scrollBottom: true });
+        if (this.isPageVisible()) void this.markActiveRead(conversationId);
         if (state.needsSync) {
           state.needsSync = false;
           void this.syncLatest(conversationId);
@@ -887,6 +956,7 @@ export class ChatView {
       if (this.activeId === conversationId) {
         const nearBottom = this.isNearBottom();
         this.renderMessages({ scrollBottom: nearBottom, preserve: !nearBottom });
+        if (this.isPageVisible()) void this.markActiveRead(conversationId);
       }
     } catch {
       // Realtime will retry on the next connection; do not interrupt the UI.
@@ -1152,6 +1222,13 @@ export class ChatView {
       if (row?.created_at) item.createdAt = row.created_at;
       state.items.sort(compareItems);
       this.markActivity(item.conversationId, item.createdAt);
+
+      if (
+        this.activeId === item.conversationId &&
+        this.isPageVisible()
+      ) {
+        void this.markActiveRead(item.conversationId);
+      }
     } catch (error) {
       item.status = 'failed';
       item.error = humanizeError(error, 'Не удалось отправить сообщение.');
@@ -1202,6 +1279,188 @@ export class ChatView {
     } catch {
       // A retry happens on reconnect via syncLatest().
     }
+  }
+
+  handleRealtimeMessage(row) {
+    const conversationId = row?.conversation_id;
+    if (!conversationId || !this.hasConversation(conversationId)) return;
+    if (!row.id || this.seenIncoming.has(row.id)) return;
+
+    this.seenIncoming.add(row.id);
+    if (this.seenIncoming.size > 500) {
+      const [oldest] = this.seenIncoming;
+      this.seenIncoming.delete(oldest);
+    }
+
+    const own = row.sender_id === this.profile.id;
+    const active = this.activeId === conversationId;
+    const visible = this.isPageVisible();
+
+    if (own) {
+      void this.handleIncoming(row);
+      return;
+    }
+
+    if (active && visible) {
+      void this.handleIncoming(row).then(() => {
+        if (this.activeId === conversationId && this.isPageVisible()) {
+          void this.markActiveRead(conversationId);
+        }
+      });
+      return;
+    }
+
+    this.unreadToken += 1;
+    this.unread = incrementUnread(this.unread, conversationId, 1);
+    this.renderUnreadIndicators();
+    this.notifyIncoming(row);
+    void this.handleIncoming(row);
+  }
+
+  notifyIncoming(row) {
+    const conversation = this.conversations.find(
+      (item) => item.id === row.conversation_id,
+    );
+    if (!conversation) return;
+
+    const sender = conversation.members.find(
+      (member) => member.userId === row.sender_id,
+    );
+    const senderName = sender?.profile?.displayName || 'Участник';
+    const title = conversationTitle(conversation, this.profile.id);
+    const focused =
+      typeof document.hasFocus === 'function' ? document.hasFocus() : false;
+
+    if (this.isPageVisible() && focused) {
+      toast(`Новое сообщение от ${senderName}`, 'info');
+      return;
+    }
+
+    const eligible = shouldNotify({
+      enabled: getNotificationPreference(this.profile.id),
+      permission: getNotificationPermission(),
+      visibility: document.visibilityState,
+      focused,
+      senderId: row.sender_id,
+      userId: this.profile.id,
+    });
+
+    if (!eligible || !claimNotification(row.id)) return;
+
+    const text = notificationText({
+      kind: conversation.kind,
+      senderName,
+      conversationTitle: title,
+    });
+
+    showBrowserNotification({
+      ...text,
+      tag: `bars:${conversation.id}`,
+      onClick: () => {
+        this.callbacks.onSelectConversation?.(conversation.id);
+      },
+    });
+  }
+
+  handleAttention() {
+    if (!this.els) return;
+
+    void this.markActiveRead();
+    void this.refreshUnreadCounts();
+  }
+
+  async refreshUnreadCounts({ markActive = true } = {}) {
+    if (!this.els) return;
+
+    const token = ++this.unreadToken;
+
+    try {
+      const rows = await listUnreadCounts();
+      if (!this.els || token !== this.unreadToken) return;
+
+      const counts = unreadFromRows(rows);
+
+      // The open conversation is being read right now. Do not let a refresh
+      // that raced with the read RPC flash its badge back on screen.
+      if (markActive && this.activeId && this.isPageVisible()) {
+        const state = this.states.get(this.activeId);
+        if (state?.loaded || state?.loading) counts.delete(this.activeId);
+      }
+
+      this.unread = counts;
+      this.renderUnreadIndicators();
+
+      if (markActive && this.activeId && this.isPageVisible()) {
+        const state = this.states.get(this.activeId);
+        if (state?.loaded) void this.markActiveRead(this.activeId);
+      }
+    } catch {
+      // Counts are an enhancement; keep the last known state on failure.
+    }
+  }
+
+  async markActiveRead(conversationId = this.activeId) {
+    if (!conversationId) return;
+
+    const state = this.states.get(conversationId);
+    if (!state?.loaded) return;
+
+    const seq = maxSeq(state.items);
+    if (seq <= 0) {
+      this.clearConversationUnread(conversationId);
+      return;
+    }
+
+    await this.markReadUpTo(conversationId, seq);
+  }
+
+  async markReadUpTo(conversationId, seq) {
+    this.clearConversationUnread(conversationId);
+
+    const target = Math.floor(Number(seq));
+    if (!conversationId || !Number.isFinite(target) || target <= 0) return;
+
+    const previous = this.readMarkers.get(conversationId) ?? 0;
+    if (target <= previous) return;
+
+    this.readMarkers.set(conversationId, target);
+
+    try {
+      const stored = await markConversationRead(conversationId, target);
+      if (Number.isFinite(stored)) {
+        this.readMarkers.set(
+          conversationId,
+          Math.max(this.readMarkers.get(conversationId) ?? 0, stored),
+        );
+      }
+    } catch {
+      if (this.readMarkers.get(conversationId) === target) {
+        this.readMarkers.delete(conversationId);
+      }
+      // The optimistic clear may hide a real badge; re-sync with the server.
+      // Do not retry the failing mark from inside this refresh: a persistent
+      // error would otherwise loop between mark and refresh.
+      void this.refreshUnreadCounts({ markActive: false });
+    }
+  }
+
+  clearConversationUnread(conversationId) {
+    const next = clearUnread(this.unread, conversationId);
+    if (next === this.unread) return;
+
+    this.unread = next;
+    this.renderUnreadIndicators();
+  }
+
+  renderUnreadIndicators() {
+    if (!this.els) return;
+
+    this.renderConversationList();
+    this.updateDocumentTitle();
+  }
+
+  isPageVisible() {
+    return document.visibilityState === 'visible';
   }
 
   markActivity(conversationId, createdAt) {
